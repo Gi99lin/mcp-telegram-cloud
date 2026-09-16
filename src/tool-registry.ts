@@ -122,11 +122,24 @@ export function toolBudgetMs(toolName: string): number {
   return SLOW_TOOLS.has(toolName) ? appConfig.toolTimeoutSlowMs : appConfig.toolTimeoutMs;
 }
 
+/**
+ * Outer backstop for the whole connection check.
+ *
+ * `requireConnection` can legitimately spend up to one connect budget inside
+ * `ensureActiveSession` and another on its own `ensureConnected()`, and both of those mark
+ * their own precise target when they expire. This wrapper exists only for the case where
+ * neither fires — so it must be comfortably larger than their sum, otherwise it would cut
+ * in first, win the race, and throw away the accurate attribution (review finding).
+ */
+function connectBackstopMs(): number {
+  return appConfig.telegramConnectTimeoutMs > 0 ? appConfig.telegramConnectTimeoutMs * 3 : 0;
+}
+
 /** Budget that applies at a given stage — used only as a fallback when a deadline error
  *  arrives without its own `timeoutMs` (cross-module-instance case). Exported for the test
  *  that pins the review finding: a connect-stage breach must not report the tool budget. */
 export function stageBudgetMs(toolName: string, stage: "connect" | "handler"): number {
-  return stage === "connect" ? appConfig.telegramConnectTimeoutMs : toolBudgetMs(toolName);
+  return stage === "connect" ? connectBackstopMs() : toolBudgetMs(toolName);
 }
 
 /**
@@ -293,11 +306,7 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
         // issue #19's permanent wedge formed.
         let connErr: string | null;
         try {
-          connErr = await withDeadline(
-            `connect:${tool.name}`,
-            appConfig.telegramConnectTimeoutMs,
-            opts.requireConnection,
-          );
+          connErr = await withDeadline(`connect:${tool.name}`, connectBackstopMs(), opts.requireConnection);
         } catch (e) {
           if (!isDeadlineError(e)) throw e;
           // No client handle exists yet at this stage — the hang happened while obtaining

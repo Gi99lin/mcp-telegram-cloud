@@ -443,19 +443,12 @@ async function handleMcpRequestInner(
     return current;
   };
 
-  /**
-   * Account that was active when the most recent connection attempt STARTED.
-   *
-   * A connect-stage timeout carries no client handle — the hang happened while obtaining
-   * one — so `markUnhealthy` would otherwise fall back to "whichever account is active
-   * now". A user who switches accounts mid-call would then have the wrong connection marked
-   * and the broken one left alone (review finding). Captured per attempt, read by the
-   * timeout hook.
-   */
-  let connectingAccountId = sessions.getActiveAccountId(userId);
-
   const requireConnection = async (): Promise<string | null> => {
-    connectingAccountId = sessions.getActiveAccountId(userId);
+    // Captured per invocation, NOT in a shared closure variable (review finding): several
+    // tool calls run concurrently inside one MCP session, and a shared variable could be
+    // overwritten by a later call before this one's timeout was handled — marking an
+    // account that was never in trouble while leaving the wedged one alone.
+    const accountIdAtStart = sessions.getActiveAccountId(userId);
     try {
       // Hot-path: if a switch happened between tool calls, the secondary
       // account may not be in the pool yet — materialise it lazily here so
@@ -471,9 +464,10 @@ async function handleMcpRequestInner(
       return `Not connected to Telegram.${reason}`;
     } catch (e) {
       if (isDeadlineError(e)) {
-        // Throwing propagates to the registry, which reports the timeout and triggers the
-        // memory-only rebuild. Returning a string here would instead read as a plain
-        // "not connected" and leave the dead client in the pool.
+        // Mark HERE, where the account being connected is a local constant. Then rethrow so
+        // the registry still records the timeout and answers the client. Returning a string
+        // instead would read as a plain "not connected" and leave the dead client pooled.
+        sessions.markUnhealthy(userId, { accountId: accountIdAtStart });
         throw e;
       }
       return "Not connected to Telegram. Session not found — please reconnect.";
@@ -497,9 +491,13 @@ async function handleMcpRequestInner(
     });
     // `client` fences the mark to the instance that actually timed out, so a late report
     // cannot knock offline a session a concurrent call already replaced (review finding).
-    // It is absent only for connect-stage timeouts, where no handle was ever obtained —
-    // those fall back to the account captured when the attempt started.
-    sessions.markUnhealthy(userId, client ? { expected: client } : { accountId: connectingAccountId });
+    //
+    // It is absent only when the registry's outer backstop fired before the inner, precise
+    // deadlines did — `requireConnection` and `SessionManager` both mark their own target
+    // first, so reaching here without a handle means we never learned which client hung.
+    // Falling back to the currently active account is the best available guess.
+    if (client) sessions.markUnhealthy(userId, { expected: client });
+    else sessions.markUnhealthy(userId);
   };
 
   const onSessionRevoked = async () => {

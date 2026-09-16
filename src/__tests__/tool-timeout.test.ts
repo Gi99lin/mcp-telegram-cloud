@@ -186,15 +186,24 @@ describe("tool deadline (issue #19)", () => {
     assert.deepEqual(audit, [{ tool: "slow-tool", result: "error" }], "no double-counting");
   });
 
-  it("a connect-stage breach falls back to the connect budget, not the tool budget", async () => {
+  it("a connect-stage breach falls back to the connect backstop, not the tool budget", async () => {
     // Review finding: `isDeadlineError` also accepts a same-named error from another module
     // instance, which may carry no `timeoutMs`. The fallback used to be the tool budget, so
-    // a 30ms connect breach was reported as "timed out at connect after 180000ms" and would
-    // send an operator to the wrong env knob.
-    assert.equal(stageBudgetMs("telegram-read-messages", "connect"), 30);
+    // a connect breach was reported as "timed out at connect after 180000ms" and would send
+    // an operator to the wrong env knob.
+    //
+    // The backstop is 3x the connect budget on purpose: `requireConnection` can legitimately
+    // spend one budget in ensureActiveSession and another in ensureConnected, and those
+    // inner deadlines must win the race so the right account gets marked.
+    assert.equal(stageBudgetMs("telegram-read-messages", "connect"), 90, "3 x TELEGRAM_CONNECT_TIMEOUT_MS");
     assert.equal(stageBudgetMs("telegram-read-messages", "handler"), 40);
-    assert.equal(stageBudgetMs("telegram-download-media", "connect"), 30, "stage wins over the slow-tool list");
+    assert.equal(stageBudgetMs("telegram-download-media", "connect"), 90, "stage wins over the slow-tool list");
     assert.equal(stageBudgetMs("telegram-download-media", "handler"), 400);
+  });
+
+  it("the connect backstop stays disabled when the connect budget is disabled", async () => {
+    config.telegramConnectTimeoutMs = 0; // 0 means "no deadline" everywhere else too
+    assert.equal(stageBudgetMs("telegram-read-messages", "connect"), 0, "0 must not become 0*3 semantics drift");
   });
 
   it("byte-moving tools get the long budget, ordinary tools the short one", async () => {
