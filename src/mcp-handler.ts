@@ -443,7 +443,19 @@ async function handleMcpRequestInner(
     return current;
   };
 
+  /**
+   * Account that was active when the most recent connection attempt STARTED.
+   *
+   * A connect-stage timeout carries no client handle — the hang happened while obtaining
+   * one — so `markUnhealthy` would otherwise fall back to "whichever account is active
+   * now". A user who switches accounts mid-call would then have the wrong connection marked
+   * and the broken one left alone (review finding). Captured per attempt, read by the
+   * timeout hook.
+   */
+  let connectingAccountId = sessions.getActiveAccountId(userId);
+
   const requireConnection = async (): Promise<string | null> => {
+    connectingAccountId = sessions.getActiveAccountId(userId);
     try {
       // Hot-path: if a switch happened between tool calls, the secondary
       // account may not be in the pool yet — materialise it lazily here so
@@ -483,10 +495,11 @@ async function handleMcpRequestInner(
       event: "session.unhealthy",
       tool: toolName,
     });
-    // `client` fences the drop to the instance that actually timed out, so a late report
-    // cannot evict a session a concurrent call already rebuilt (review finding). It is
-    // absent only for connect-stage timeouts, where no handle was ever obtained.
-    sessions.markUnhealthy(userId, client);
+    // `client` fences the mark to the instance that actually timed out, so a late report
+    // cannot knock offline a session a concurrent call already replaced (review finding).
+    // It is absent only for connect-stage timeouts, where no handle was ever obtained —
+    // those fall back to the account captured when the attempt started.
+    sessions.markUnhealthy(userId, client ? { expected: client } : { accountId: connectingAccountId });
   };
 
   const onSessionRevoked = async () => {

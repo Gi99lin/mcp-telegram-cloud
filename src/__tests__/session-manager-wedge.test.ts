@@ -271,7 +271,7 @@ describe("SessionManager.markUnhealthy (issue #19)", () => {
     assert.equal(sm.getSession("user-G"), second as unknown as TelegramService, "precondition: pool moved on");
 
     // The late report names the OLD client — it must be ignored.
-    sm.markUnhealthy("user-G", first as unknown as TelegramService);
+    sm.markUnhealthy("user-G", { expected: first as unknown as TelegramService });
 
     assert.equal(second.unhealthyReasons.length, 0, "the live client must not be knocked offline");
     assert.equal(sm.getSession("user-G"), second as unknown as TelegramService, "healthy session must survive");
@@ -283,9 +283,50 @@ describe("SessionManager.markUnhealthy (issue #19)", () => {
     sm.saveSessionString("user-H", "session-H");
     await sm.getOrCreateSession("user-H");
 
-    sm.markUnhealthy("user-H", only as unknown as TelegramService);
+    sm.markUnhealthy("user-H", { expected: only as unknown as TelegramService });
 
     assert.equal(only.unhealthyReasons.length, 1);
+  });
+
+  it("marks the account that actually timed out, even after the user switched accounts", async () => {
+    // Review finding (multi-account): resolving the target from "whichever account is
+    // active now" marked the wrong connection when a switch landed between the call
+    // starting and its deadline firing — the broken account stayed broken.
+    const primary = new HealthyTelegramService();
+    const secondary = new HealthyTelegramService();
+    const { sm } = makeManager([primary, secondary]);
+    sm.saveSessionString("user-M", "session-M");
+    await sm.getOrCreateSession("user-M");
+
+    const accountId = sm.addAccount("user-M", "tg-2", "session-M2", "work");
+    sm.setActiveAccount("user-M", accountId);
+    await sm.ensureActiveSession("user-M"); // materialises the secondary in its own pool slot
+    assert.equal(sm.getSession("user-M"), secondary as unknown as TelegramService, "precondition: switched");
+
+    // The timeout belongs to the PRIMARY client, reported after the switch.
+    sm.markUnhealthy("user-M", { expected: primary as unknown as TelegramService });
+
+    assert.equal(primary.unhealthyReasons.length, 1, "the client that timed out must be marked");
+    assert.equal(secondary.unhealthyReasons.length, 0, "the account in use must be left alone");
+  });
+
+  it("connect-stage reports target the account captured at attempt start, not the current one", async () => {
+    const primary = new HealthyTelegramService();
+    const secondary = new HealthyTelegramService();
+    const { sm } = makeManager([primary, secondary]);
+    sm.saveSessionString("user-N", "session-N");
+    await sm.getOrCreateSession("user-N");
+
+    const accountId = sm.addAccount("user-N", "tg-2", "session-N2", "work");
+    sm.setActiveAccount("user-N", accountId);
+    await sm.ensureActiveSession("user-N");
+
+    // No handle available (connect-stage): the caller names the account that was active
+    // when the attempt began — the primary.
+    sm.markUnhealthy("user-N", { accountId: 0 });
+
+    assert.equal(primary.unhealthyReasons.length, 1);
+    assert.equal(secondary.unhealthyReasons.length, 0);
   });
 });
 

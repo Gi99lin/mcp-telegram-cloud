@@ -24,10 +24,25 @@ export const AUTH_ERROR_PATTERNS = [
   "USER_DEACTIVATED_BAN",
 ] as const;
 
+/**
+ * Upstream does not always surface the raw token. `TelegramService.connect()` catches
+ * `AUTH_KEY_UNREGISTERED` / `SESSION_REVOKED` / `USER_DEACTIVATED` and rewrites `lastError`
+ * into the sentence below (telegram-client.js: "Session revoked. Run telegram-login to
+ * re-authenticate.").
+ *
+ * Matching only the uppercase tokens therefore produced the OPPOSITE failure of the one we
+ * were fixing (review finding): a genuinely revoked session was never recognised, its row
+ * was kept forever and every later call retried an auth key Telegram had already thrown
+ * away. Deliberately narrow so "Network error: …" and "Connection marked unhealthy: …"
+ * — the other two sentences upstream writes — keep the credentials.
+ */
+const REVOCATION_PHRASES = [/session revoked/i, /auth key (unregistered|invalid)/i] as const;
+
 /** True when `message` carries positive evidence that the session is no longer usable. */
 export function isAuthErrorMessage(message: string | undefined | null): boolean {
   if (!message) return false;
-  return AUTH_ERROR_PATTERNS.some((p) => message.includes(p));
+  if (AUTH_ERROR_PATTERNS.some((p) => message.includes(p))) return true;
+  return REVOCATION_PHRASES.some((re) => re.test(message));
 }
 
 /** Same test for a thrown value. */

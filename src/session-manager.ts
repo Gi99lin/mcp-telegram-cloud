@@ -306,24 +306,42 @@ export class SessionManager {
    * no-op. Callers that genuinely cannot name the instance (connect-stage timeouts, where
    * the hang happened before we ever got a handle) may omit it and accept the wider scope.
    */
-  markUnhealthy(ownerUserId: string, expected?: TelegramService): void {
-    const accountId = this.getActiveAccountId(ownerUserId);
+  markUnhealthy(ownerUserId: string, target: { expected?: TelegramService; accountId?: number } = {}): void {
+    // The pool ENTRY always stays (review finding): evicting it made the next call construct
+    // a second TelegramService while the timed-out one was potentially still alive on the
+    // same auth key, which Telegram answers with AUTH_KEY_DUPLICATED — a different way to be
+    // unusable. Marking the existing client keeps exactly one client per user and lets
+    // upstream destroy its dead sender before reconnecting from the same session string.
+    const mark = (session: UserSession) => {
+      session.telegram.markUnhealthy("tool call exceeded its deadline");
+      console.log(
+        `[sessions] Marked ${logUser(ownerUserId)} unhealthy after tool timeout — next call revalidates the connection`,
+      );
+    };
+
+    if (target.expected) {
+      // Resolve BY IDENTITY, not by "whichever account is active now" (review finding):
+      // a user can switch accounts while a doomed call is still in flight, and keying off
+      // the current account would mark the wrong connection while leaving the broken one
+      // untouched. Scanning the owner's own pool slots finds the timed-out client wherever
+      // it lives, and finds nothing once it has been replaced — which is the stale case.
+      for (const [key, session] of this.sessions) {
+        if (key !== ownerUserId && !key.startsWith(`${ownerUserId}#`)) continue;
+        if (session.telegram !== target.expected) continue;
+        mark(session);
+        return;
+      }
+      console.log(`[sessions] Ignoring stale timeout for ${logUser(ownerUserId)} — that client is no longer pooled`);
+      return;
+    }
+
+    // No handle (connect-stage timeout): the caller passes the account that was active when
+    // the attempt STARTED, so a switch mid-flight cannot redirect the mark.
+    const accountId = target.accountId ?? this.getActiveAccountId(ownerUserId);
     const key = accountId > 0 ? secondaryKey(ownerUserId, accountId) : ownerUserId;
     const pooled = this.sessions.get(key);
     if (!pooled) return;
-    if (expected && pooled.telegram !== expected) {
-      console.log(`[sessions] Ignoring stale timeout for ${logUser(ownerUserId)} — pooled client was already replaced`);
-      return;
-    }
-    // The pool ENTRY stays (review finding): evicting it made the next call construct a
-    // second TelegramService while the timed-out one was potentially still alive on the same
-    // auth key, which Telegram answers with AUTH_KEY_DUPLICATED — a different way to be
-    // unusable. Marking the existing client keeps exactly one client per user and lets
-    // upstream destroy its dead sender before reconnecting from the same session string.
-    pooled.telegram.markUnhealthy("tool call exceeded its deadline");
-    console.log(
-      `[sessions] Marked ${logUser(ownerUserId)} unhealthy after tool timeout — next call revalidates the connection`,
-    );
+    mark(pooled);
   }
 
   /** Save a user's session string to SQLite for persistence across restarts.
