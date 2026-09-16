@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { TelegramService } from "@overpod/mcp-telegram/service";
 import { config } from "./config.js";
 import { decryptSecret, encryptionEnabled, encryptSecret, hashToken, isEncrypted } from "./crypto.js";
+import { isDeadlineError, withDeadline } from "./deadline.js";
 import { logUser } from "./logger.js";
 
 interface UserSession {
@@ -197,9 +198,26 @@ export class SessionManager {
       existing.lastActivity = new Date();
       // Try to reconnect if disconnected
       if (!existing.telegram.isConnected()) {
-        await existing.telegram.ensureConnected();
+        // issue #19: this await runs INSIDE the per-user lock. Unbounded, a half-open
+        // socket pinned the lock chain forever and every later call for this user queued
+        // behind a promise that never settled. Bounded, the worst case is one slow call
+        // that then throws the dead client away and rebuilds below.
+        try {
+          await withDeadline("ensureConnected", config.telegramConnectTimeoutMs, () =>
+            existing.telegram.ensureConnected(),
+          );
+          return existing.telegram;
+        } catch (e) {
+          if (!isDeadlineError(e)) throw e;
+          console.error(
+            `[sessions] ensureConnected timed out for ${logUser(userId)}, discarding pooled client and rebuilding`,
+          );
+          this.discardPooled(userId);
+          // fall through to the rebuild-from-SQLite path below
+        }
+      } else {
+        return existing.telegram;
       }
-      return existing.telegram;
     }
 
     const telegram = this.telegramFactory(this.apiId, this.apiHash);
@@ -213,7 +231,7 @@ export class SessionManager {
       telegram.setSessionString(decryptSecret(row.session_string));
     }
 
-    const connected = await telegram.connect();
+    const connected = await this.connectBounded(telegram, userId);
 
     // Only add to pool if connection succeeded — don't cache broken sessions
     if (connected) {
@@ -227,6 +245,59 @@ export class SessionManager {
     }
 
     return telegram;
+  }
+
+  /**
+   * issue #19 — drop a pool entry whose client is unusable, WITHOUT touching persisted
+   * state. The encrypted `session_string` stays in SQLite, Telegram is never logged out
+   * and OAuth is never revoked, so the very next call rebuilds a fresh `TelegramService`
+   * from the same auth key and the user never sees a re-login prompt.
+   *
+   * Callers must already hold the lock for `key` (or be outside the lock discipline
+   * entirely, as `markUnhealthy` is), because this only mutates the Map.
+   */
+  private discardPooled(key: string): void {
+    const pooled = this.sessions.get(key);
+    if (!pooled) return;
+    this.sessions.delete(key);
+    // Fire-and-forget: the whole point is that this client is unresponsive, so awaiting
+    // its teardown would reintroduce the hang we are removing.
+    pooled.telegram.disconnect().catch(() => {});
+  }
+
+  /**
+   * `telegram.connect()` under a deadline. Returns false (rather than throwing) on a
+   * breach so callers keep their existing "connect failed → don't pool it" branch.
+   */
+  private async connectBounded(telegram: TelegramService, userId: string): Promise<boolean> {
+    try {
+      return await withDeadline("connect", config.telegramConnectTimeoutMs, () => telegram.connect());
+    } catch (e) {
+      if (!isDeadlineError(e)) throw e;
+      console.error(`[sessions] connect timed out for ${logUser(userId)} after ${e.timeoutMs}ms`);
+      telegram.disconnect().catch(() => {});
+      return false;
+    }
+  }
+
+  /**
+   * issue #19 — mark a user's live Telegram client as unusable after a tool-call deadline
+   * breach. Non-destructive by contract (see {@link discardPooled}): memory only.
+   *
+   * Routed through the active-account key so a user on a secondary account gets the
+   * account they are actually using rebuilt, not their primary.
+   *
+   * Deliberately fire-and-forget and lock-free: it is called from the error path of a call
+   * that just timed out, and must not itself block or throw.
+   */
+  markUnhealthy(ownerUserId: string): void {
+    const accountId = this.getActiveAccountId(ownerUserId);
+    const key = accountId > 0 ? secondaryKey(ownerUserId, accountId) : ownerUserId;
+    if (!this.sessions.has(key)) return;
+    this.discardPooled(key);
+    console.log(
+      `[sessions] Marked ${logUser(ownerUserId)} unhealthy after tool timeout — pooled client dropped, session string kept`,
+    );
   }
 
   /** Save a user's session string to SQLite for persistence across restarts.
@@ -317,9 +388,14 @@ export class SessionManager {
 
     if (session) {
       try {
-        // Reconnect if disconnected, so we can logOut properly
-        await session.telegram.ensureConnected();
-        loggedOut = await session.telegram.logOut();
+        // Reconnect if disconnected, so we can logOut properly.
+        // Bounded (issue #19): this runs inside the per-user lock, so an unbounded wait on
+        // a half-open socket would wedge the user on the "Disconnect" path too. Local
+        // teardown below must happen regardless of whether Telegram answers.
+        loggedOut = await withDeadline("logOut", config.telegramConnectTimeoutMs, async () => {
+          await session.telegram.ensureConnected();
+          return session.telegram.logOut();
+        });
         console.log(`[sessions] Telegram logOut for ${logUser(userId)}: ${loggedOut}`);
       } catch (error) {
         console.error(`[sessions] Telegram logOut failed for ${logUser(userId)}:`, error);
@@ -378,8 +454,13 @@ export class SessionManager {
       // fast response. logOut failures fall back to a best-effort disconnect.
       void (async () => {
         try {
-          await existing.telegram.ensureConnected();
-          const loggedOut = await existing.telegram.logOut();
+          // Bounded (issue #19): fire-and-forget, so it cannot block a caller, but an
+          // unbounded version leaks a live client plus a promise that never settles for the
+          // lifetime of the process.
+          const loggedOut = await withDeadline("logOut", config.telegramConnectTimeoutMs, async () => {
+            await existing.telegram.ensureConnected();
+            return existing.telegram.logOut();
+          });
           console.log(`[sessions] Old session logOut for ${logUser(userId)}: ${loggedOut}`);
         } catch (err: unknown) {
           console.error(`[sessions] Old session logOut failed for ${logUser(userId)}:`, err);
@@ -418,7 +499,12 @@ export class SessionManager {
     const pooled = this.sessions.get(userId);
     if (pooled) {
       try {
-        if (pooled.telegram.isConnected() && (await pooled.telegram.ensureConnected())) {
+        if (
+          pooled.telegram.isConnected() &&
+          (await withDeadline("ensureConnected", config.telegramConnectTimeoutMs, () =>
+            pooled.telegram.ensureConnected(),
+          ))
+        ) {
           console.log(`[sessions] tryReconnect: ${logUser(userId)} — pool hit (already connected)`);
           return pooled.telegram;
         }
@@ -443,7 +529,7 @@ export class SessionManager {
     try {
       const telegram = this.telegramFactory(this.apiId, this.apiHash);
       telegram.setSessionString(decryptSecret(row.session_string));
-      await telegram.connect();
+      await this.connectBounded(telegram, userId);
 
       if (telegram.isConnected()) {
         // Success — replace stale pool entry
@@ -650,8 +736,24 @@ export class SessionManager {
       const pooled = this.sessions.get(key);
       if (pooled) {
         pooled.lastActivity = new Date();
-        if (!pooled.telegram.isConnected()) await pooled.telegram.ensureConnected();
-        return pooled.telegram;
+        if (!pooled.telegram.isConnected()) {
+          // Same lock-pinning hazard as the primary path (issue #19), same bound.
+          try {
+            await withDeadline("ensureConnected", config.telegramConnectTimeoutMs, () =>
+              pooled.telegram.ensureConnected(),
+            );
+            return pooled.telegram;
+          } catch (e) {
+            if (!isDeadlineError(e)) throw e;
+            console.error(
+              `[sessions] ensureConnected timed out for secondary account of ${logUser(ownerUserId)}, rebuilding`,
+            );
+            this.discardPooled(key);
+            // fall through and rebuild from telegram_accounts below
+          }
+        } else {
+          return pooled.telegram;
+        }
       }
       const row = this.db
         .prepare("SELECT session_string FROM telegram_accounts WHERE owner_user_id = ? AND account_id = ?")
@@ -664,7 +766,7 @@ export class SessionManager {
       }
       const telegram = this.telegramFactory(this.apiId, this.apiHash);
       telegram.setSessionString(decryptSecret(row.session_string));
-      const connected = await telegram.connect();
+      const connected = await this.connectBounded(telegram, ownerUserId);
       if (connected) {
         this.sessions.set(key, { telegram, connectedAt: new Date(), lastActivity: new Date() });
       }

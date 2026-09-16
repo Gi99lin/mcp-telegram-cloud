@@ -7,6 +7,7 @@ import {
   type DestructiveRecord,
   type OnSessionRevoked,
   type OnToolCall,
+  type OnToolTimeout,
   type RateLimitCheck,
   type RequireConnection,
   registerAllTools,
@@ -67,6 +68,9 @@ export interface RegisterAllowedToolsExtras {
   sessions?: SessionManager;
   /** v2.32.0: public-facing base URL (https://mcp-telegram.com) for accounts-add URLs. */
   baseUrl?: string;
+  /** issue #19: drop the caller's in-memory Telegram client after a deadline breach.
+   *  Passed through extras rather than as a 10th positional parameter. */
+  onToolTimeout?: OnToolTimeout;
 }
 
 export function registerAllAllowedTools(
@@ -93,5 +97,6 @@ export function registerAllAllowedTools(
     ...(extras?.fetchUrl !== undefined && { fetchUrl: extras.fetchUrl }),
     ...(extras?.sessions !== undefined && { sessions: extras.sessions }),
     ...(extras?.baseUrl !== undefined && { baseUrl: extras.baseUrl }),
+    ...(extras?.onToolTimeout !== undefined && { onToolTimeout: extras.onToolTimeout }),
   });
 }

@@ -122,6 +122,10 @@ export const HTTP_REQUESTS = counter("http.requests", "HTTP requests served", "1
 export const HTTP_DURATION = histogram("http.duration", "HTTP request duration", HTTP_BUCKETS_MS, "ms");
 export const TOOL_CALLS = counter("mcp.tool.calls", "MCP tool calls (post-handler)", "1");
 export const TOOL_DURATION = histogram("mcp.tool.duration", "MCP tool handler duration", TOOL_BUCKETS_MS, "ms");
+/** issue #19 — deadline breaches on the tool path, by tool and stage (`connect` |
+ * `handler`). A non-zero rate here is the direct signal that Telegram sockets are going
+ * half-open; before v2.59.0 those calls simply hung forever and showed up nowhere. */
+export const TOOL_TIMEOUTS = counter("mcp.tool.timeouts", "Tool-call deadline breaches by tool+stage", "1");
 export const OAUTH_FLOW = counter("oauth.flow", "OAuth flow step outcomes", "1");
 export const RATE_LIMIT_HITS = counter("rate_limit.hits", "Rate-limit denials by tier", "1");
 /** Outbound OTLP export failures, by signal and classified reason. Surfaces silent
@@ -440,6 +444,7 @@ export function _resetMetricsForTest(): void {
   // Re-register the canonical defs so tests can `incr(HTTP_REQUESTS, ...)` without re-importing.
   counters.set(HTTP_REQUESTS.name, HTTP_REQUESTS);
   counters.set(TOOL_CALLS.name, TOOL_CALLS);
+  counters.set(TOOL_TIMEOUTS.name, TOOL_TIMEOUTS);
   counters.set(OAUTH_FLOW.name, OAUTH_FLOW);
   counters.set(RATE_LIMIT_HITS.name, RATE_LIMIT_HITS);
   counters.set(TELEMETRY_EXPORT_ERRORS.name, TELEMETRY_EXPORT_ERRORS);
@@ -448,6 +453,7 @@ export function _resetMetricsForTest(): void {
   histograms.set(TOOL_DURATION.name, TOOL_DURATION);
   HTTP_REQUESTS.data.clear();
   TOOL_CALLS.data.clear();
+  TOOL_TIMEOUTS.data.clear();
   OAUTH_FLOW.data.clear();
   RATE_LIMIT_HITS.data.clear();
   TELEMETRY_EXPORT_ERRORS.data.clear();

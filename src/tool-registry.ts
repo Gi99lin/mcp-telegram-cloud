@@ -2,9 +2,12 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
+// Aliased: `config` is shadowed by a local per-tool registration object below.
+import { config as appConfig } from "./config.js";
+import { isDeadlineError, withDeadline } from "./deadline.js";
 import { logger } from "./logger.js";
 import type { SessionManager } from "./session-manager.js";
-import { incr, observe, TOOL_CALLS, TOOL_DURATION } from "./telemetry/metrics.js";
+import { incr, observe, TOOL_CALLS, TOOL_DURATION, TOOL_TIMEOUTS } from "./telemetry/metrics.js";
 import { getActiveSpanContext, SpanKind, withSpan } from "./telemetry/tracer.js";
 import { deriveTitle } from "./tools/helpers.js";
 import type { UploadStore } from "./upload-store.js";
@@ -12,6 +15,13 @@ import type { fetchUrlSafely } from "./url-fetcher.js";
 
 export type RequireConnection = () => Promise<string | null>;
 export type OnSessionRevoked = () => Promise<void>;
+/**
+ * issue #19 — invoked when a tool call or its connection check breached its deadline.
+ * The implementation (mcp-handler) drops the user's in-memory TelegramService so the next
+ * call rebuilds it from the persisted session string. Non-destructive by contract: it must
+ * never log out of Telegram, revoke OAuth, or delete the stored session.
+ */
+export type OnToolTimeout = (toolName: string) => void;
 export type RateLimitCheck = (toolName: string) => string | null;
 export type OnToolCall = (toolName: string) => void;
 /** Phase 2.1 hook for tools whose annotation has `destructiveHint=true`. Returns
@@ -102,6 +112,78 @@ export function resetSkipLogDedupe(): void {
 const SESSION_REVOKED_MSG =
   "Telegram session was revoked or expired. Please reconnect: Disconnect → Connect again in your app settings.";
 
+/**
+ * Tools allowed the long budget (`config.toolTimeoutSlowMs`): they move bytes over the
+ * wire or wait on Telegram-side processing, so minutes are normal rather than a symptom.
+ * Everything else gets `config.toolTimeoutMs`.
+ */
+export const SLOW_TOOLS: ReadonlySet<string> = new Set([
+  "telegram-send-file",
+  "telegram-send-voice",
+  "telegram-send-video-note",
+  "telegram-send-album",
+  "telegram-send-story",
+  "telegram-edit-story",
+  "telegram-set-profile-photo",
+  "telegram-download-media",
+  "telegram-transcribe-audio",
+  "telegram-get-transcription",
+]);
+
+/** Budget for one tool, in ms. Exported for the guard test. */
+export function toolBudgetMs(toolName: string): number {
+  return SLOW_TOOLS.has(toolName) ? appConfig.toolTimeoutSlowMs : appConfig.toolTimeoutMs;
+}
+
+/**
+ * Log + count a deadline breach and hand the session to `onToolTimeout` for a
+ * memory-only rebuild. Never throws: self-healing is best-effort and must not turn a
+ * timeout into a second failure on the response path.
+ */
+function reportTimeout(
+  toolName: string,
+  timeoutMs: number,
+  stage: "connect" | "handler",
+  onToolTimeout: OnToolTimeout | undefined,
+): void {
+  const budget = Number.isFinite(timeoutMs) ? timeoutMs : toolBudgetMs(toolName);
+  logger.warn(`Tool ${toolName} timed out at ${stage} after ${budget}ms`, {
+    component: "tools",
+    event: "tool.timeout",
+    tool: toolName,
+    reason: stage,
+    durationMs: budget,
+  });
+  incr(TOOL_TIMEOUTS, { tool: toolName, stage });
+  try {
+    onToolTimeout?.(toolName);
+  } catch (err) {
+    logger.error(`onToolTimeout hook failed for ${toolName}: ${(err as Error).message}`, {
+      component: "tools",
+      event: "tool.timeout.hook_failed",
+      tool: toolName,
+    });
+  }
+}
+
+/**
+ * A timeout is NOT proof the action did not happen — promises are not cancellable, so the
+ * Telegram call may still land. The wording says so explicitly, because the failure mode
+ * we are guarding against is an agent "retrying" a send that already went through.
+ */
+function timeoutMessage(toolName: string, timeoutMs: number): string {
+  // `isDeadlineError` also accepts a same-named error from another module instance, which
+  // may not carry our fields — never render `NaNs` into a user-facing string.
+  const seconds = Number.isFinite(timeoutMs)
+    ? Math.round(timeoutMs / 1000)
+    : Math.round(appConfig.toolTimeoutMs / 1000);
+  return (
+    `Telegram did not answer ${toolName} within ${seconds}s, so the call was abandoned. ` +
+    "The connection has been reset and the next call will reconnect automatically. " +
+    "Note the operation may still have completed on Telegram's side — check before retrying a send or delete."
+  );
+}
+
 function handleToolError(e: unknown, onRevoked: OnSessionRevoked, toolName: string): CallToolResult {
   const msg = (e as Error).message ?? String(e);
   if (isAuthError(e)) {
@@ -126,6 +208,8 @@ export interface RegisterAllOptions {
   getTelegram: () => TelegramService;
   requireConnection: RequireConnection;
   onSessionRevoked?: OnSessionRevoked;
+  /** issue #19 — called on a deadline breach so the stale session can be dropped. */
+  onToolTimeout?: OnToolTimeout;
   onToolCall?: OnToolCall;
   checkRateLimit?: RateLimitCheck;
   /** Pre-handler check for destructive tools (annotation `destructiveHint=true`).
@@ -206,7 +290,21 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
       }
 
       if (!tool.skipRequireConnection) {
-        const connErr = await opts.requireConnection();
+        // Bounded even though requireConnection swallows its own errors: it reaches
+        // GramJS `ensureConnected()` through the per-user lock, which is exactly where
+        // issue #19's permanent wedge formed.
+        let connErr: string | null;
+        try {
+          connErr = await withDeadline(
+            `connect:${tool.name}`,
+            appConfig.telegramConnectTimeoutMs,
+            opts.requireConnection,
+          );
+        } catch (e) {
+          if (!isDeadlineError(e)) throw e;
+          reportTimeout(tool.name, e.timeoutMs, "connect", opts.onToolTimeout);
+          return { content: [{ type: "text", text: timeoutMessage(tool.name, e.timeoutMs) }], isError: true };
+        }
         if (connErr) return { content: [{ type: "text", text: connErr }] };
       }
 
@@ -249,7 +347,9 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
               ...(opts.sessions !== undefined && { sessions: opts.sessions }),
               ...(opts.baseUrl !== undefined && { baseUrl: opts.baseUrl }),
             };
-            const result = await tool.handler(args, deps);
+            const result = await withDeadline(`tool:${tool.name}`, toolBudgetMs(tool.name), () =>
+              tool.handler(args, deps),
+            );
             const duration = Date.now() - start;
             const outcome = result.isError === true ? "error" : "ok";
             span.setAttribute("mcp.outcome", outcome);
@@ -269,11 +369,27 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
             return result;
           } catch (e) {
             const duration = Date.now() - start;
-            span.setAttribute("mcp.outcome", "error");
-            incr(TOOL_CALLS, { tool: tool.name, outcome: "error" });
-            observe(TOOL_DURATION, duration, { tool: tool.name, outcome: "error" });
+            const timedOut = isDeadlineError(e);
+            const outcome = timedOut ? "timeout" : "error";
+            span.setAttribute("mcp.outcome", outcome);
+            incr(TOOL_CALLS, { tool: tool.name, outcome });
+            observe(TOOL_DURATION, duration, { tool: tool.name, outcome });
+            // Until v2.59.0 `tool.duration` was logged only on the success path, so the
+            // duration of everything that failed was invisible in SigNoz — which is part of
+            // why issue #19 took guesswork to confirm. Failures now carry it too.
+            logger.info(`Tool ${tool.name} failed after ${duration}ms`, {
+              component: "tools",
+              event: "tool.duration",
+              tool: tool.name,
+              durationMs: duration,
+              outcome,
+            });
             if (isDestructive) {
               opts.recordDestructive?.(tool.name, args, "error");
+            }
+            if (timedOut) {
+              reportTimeout(tool.name, e.timeoutMs, "handler", opts.onToolTimeout);
+              return { content: [{ type: "text", text: timeoutMessage(tool.name, e.timeoutMs) }], isError: true };
             }
             const custom = tool.onError?.(e);
             if (custom) return custom;

@@ -39,6 +39,9 @@ export type LogFields = Partial<{
   event: string;
   /** Cause label, e.g. rate-limit reason or denial reason. */
   reason: string;
+  /** Result class of a bounded operation: `ok` | `error` | `timeout`. Mirrors the
+   *  `outcome` metric attribute so logs and metrics can be joined on it. */
+  outcome: string;
   /** Logical scope name (e.g. rate-limit scope key, NOT raw user input). */
   scope: string;
   /** Source channel — low-cardinality label for where an event originated. */

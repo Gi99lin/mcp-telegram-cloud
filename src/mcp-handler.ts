@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { config, iconPng256Url, iconPngUrl, iconUrl } from "./config.js";
+import { isDeadlineError, withDeadline } from "./deadline.js";
 import { type DestructiveGuard, summarizeArgs } from "./destructive-guard.js";
 import { logger, logUser } from "./logger.js";
 import { CLIENT_CLASSES, type ClientClass, classifyClient } from "./middleware/classify-client.js";
@@ -448,12 +449,40 @@ async function handleMcpRequestInner(
       // the next getTelegram() finds a live instance.
       await sessions.ensureActiveSession(userId);
       const telegram = getTelegram();
-      if (await telegram.ensureConnected()) return null;
+      // issue #19: bounded here too. `ensureActiveSession` protects the calls it makes
+      // inside the per-user lock, but this second `ensureConnected()` runs outside it and
+      // was its own unbounded await on the hot path of every tool call.
+      if (await withDeadline("requireConnection", config.telegramConnectTimeoutMs, () => telegram.ensureConnected()))
+        return null;
       const reason = telegram.lastError ? ` ${telegram.lastError}` : "";
       return `Not connected to Telegram.${reason}`;
-    } catch {
+    } catch (e) {
+      if (isDeadlineError(e)) {
+        // Throwing propagates to the registry, which reports the timeout and triggers the
+        // memory-only rebuild. Returning a string here would instead read as a plain
+        // "not connected" and leave the dead client in the pool.
+        throw e;
+      }
       return "Not connected to Telegram. Session not found — please reconnect.";
     }
+  };
+
+  /**
+   * issue #19 — a tool call (or its connection check) blew its deadline, so the live
+   * Telegram client is presumed half-open. Drop it from memory only: the encrypted session
+   * string stays in SQLite, so the next call transparently reconnects with the same auth
+   * key. Explicitly NOT `destroyUserSession` / `onSessionRevoked`, which would log out of
+   * Telegram and force the user through OAuth again for what may be a transient network
+   * fault.
+   */
+  const onToolTimeout = (toolName: string) => {
+    logger.warn(`Dropping in-memory Telegram client after ${toolName} timeout`, {
+      component: "cloud",
+      userId: logUser(userId),
+      event: "session.unhealthy",
+      tool: toolName,
+    });
+    sessions.markUnhealthy(userId);
   };
 
   const onSessionRevoked = async () => {
@@ -548,7 +577,7 @@ async function handleMcpRequestInner(
     checkRateLimit,
     checkDestructive,
     recordDestructive,
-    { userId, uploads, fetchUrl: fetchUrlSafely, sessions, baseUrl: config.issuer },
+    { userId, uploads, fetchUrl: fetchUrlSafely, sessions, baseUrl: config.issuer, onToolTimeout },
   );
 
   // Must run after registration: McpServer installs the `tools/call` handler lazily on the

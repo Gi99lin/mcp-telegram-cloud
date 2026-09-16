@@ -228,6 +228,29 @@ export const config = {
 
   /** Max request body bytes for JSON API routes (/oauth/*, /mcp). Default 1 MiB. */
   maxJsonBodyBytes: intOr(process.env.MAX_JSON_BODY_BYTES, 1024 * 1024),
+
+  /**
+   * issue #19 — deadline for one tool handler (ms). 0 disables.
+   *
+   * Deliberately generous: a deadline does NOT cancel the Telegram call (see
+   * `src/deadline.ts`), so cutting a write too early risks the LLM retrying a send that
+   * actually went through. MCP clients give up far sooner than this anyway, so the budget
+   * exists to free the session and surface a diagnosable error, not to bound latency.
+   * Production p99 for ordinary tools sat under 150s (flood-wait retries included).
+   */
+  toolTimeoutMs: intOr(process.env.TOOL_TIMEOUT_MS, 180_000),
+  /**
+   * Deadline for tools that legitimately move bytes or wait on server-side Telegram work
+   * (uploads, downloads, transcription). Applied to {@link SLOW_TOOLS} in tool-registry.
+   */
+  toolTimeoutSlowMs: intOr(process.env.TOOL_TIMEOUT_SLOW_MS, 900_000),
+  /**
+   * Deadline for connect / ensureConnected / session materialisation (ms). 0 disables.
+   * This is the one that keeps `SessionManager.withLock` from being pinned forever, so it
+   * is short: a healthy MTProto connect is sub-second, and anything past this is a
+   * half-open socket we want to throw away rather than queue behind.
+   */
+  telegramConnectTimeoutMs: intOr(process.env.TELEGRAM_CONNECT_TIMEOUT_MS, 15_000),
 };
 
 export const iconUrl = `${config.issuer}/icon.svg`;
