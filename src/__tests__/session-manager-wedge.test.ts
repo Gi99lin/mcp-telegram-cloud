@@ -274,6 +274,38 @@ describe("SessionManager.markUnhealthy (issue #19)", () => {
   });
 });
 
+describe("tryReconnectSession must not confuse 'slow' with 'invalid' (review finding)", () => {
+  it("keeps the persisted session string when connect merely times out", async () => {
+    // Regression guard: collapsing a deadline breach into the "session invalid" branch
+    // DELETEs user_sessions, which logs the user out permanently over a transient stall —
+    // strictly worse than the wedge this change set out to fix.
+    const { sm } = makeManager([new WedgeableTelegramService(true)]);
+    sm.saveSessionString("user-J", "session-J");
+
+    const result = await sm.tryReconnectSession("user-J");
+
+    assert.equal(result, null, "a timed-out reconnect yields no client");
+    assert.ok(sm.getSavedUserIds().includes("user-J"), "session_string must survive a timeout");
+  });
+
+  it("still deletes the session string when Telegram actually rejects it", async () => {
+    // The delete path must stay alive: an auth key Telegram refuses is dead weight.
+    class RejectingTelegramService extends HealthyTelegramService {
+      override async connect(): Promise<boolean> {
+        this.calls.push("connect");
+        return false; // Telegram answered: session no longer valid
+      }
+    }
+    const { sm } = makeManager([new RejectingTelegramService()]);
+    sm.saveSessionString("user-K", "session-K");
+
+    const result = await sm.tryReconnectSession("user-K");
+
+    assert.equal(result, null);
+    assert.ok(!sm.getSavedUserIds().includes("user-K"), "a rejected session must still be cleaned up");
+  });
+});
+
 describe("destroyUserSession stays bounded (issue #19 review finding)", () => {
   it("completes even when both logOut and disconnect hang", async () => {
     // The logOut path was bounded, but its FAILURE path awaited `disconnect()` unbounded —

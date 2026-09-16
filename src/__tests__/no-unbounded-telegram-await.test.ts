@@ -32,7 +32,7 @@ const GUARDED_FILES = ["session-manager.ts", "mcp-handler.ts", "tool-registry.ts
  * blank space so line numbers survive. Without this, prose and log messages mentioning
  * `withDeadline` count as evidence that a call is bounded.
  */
-export function stripNonCode(source: string): string {
+function scrub(source: string, alsoStrings: boolean): string {
   let out = "";
   let i = 0;
   const blank = (s: string) => s.replace(/[^\n]/g, " ");
@@ -53,7 +53,7 @@ export function stripNonCode(source: string): string {
     }
     const str = /^(["'`])(?:\\.|(?!\1)[\s\S])*\1/.exec(rest);
     if (str) {
-      out += blank(str[0]);
+      out += alsoStrings ? blank(str[0]) : str[0];
       i += str[0].length;
       continue;
     }
@@ -63,9 +63,39 @@ export function stripNonCode(source: string): string {
   return out;
 }
 
-/** Calls that put us on the wire and can therefore hang on a half-open socket.
- *  `[\s\n]*` tolerates `telegram\n  .ensureConnected()` and `ensureConnected(\n)`. */
-const WIRE_CALL = /\.[\s\n]*(ensureConnected|connect|logOut|disconnect)[\s\n]*\([\s\n]*\)/g;
+/** Comments AND string/template literals blanked. Used for direct call detection and for
+ *  the "is it wrapped" window, where a log message mentioning `withDeadline(` must not
+ *  count as evidence. Both passes keep line numbers aligned. */
+export function stripNonCode(source: string): string {
+  return scrub(source, true);
+}
+
+/** Comments blanked, strings KEPT: bracket dispatch (`telegram["connect"]()`) lives inside
+ *  a string literal, so blanking strings would hide the very form we want to catch. */
+export function stripComments(source: string): string {
+  return scrub(source, false);
+}
+
+/** Methods that put us on the wire and can therefore hang on a half-open socket. */
+const WIRE_METHODS = "ensureConnected|connect|logOut|disconnect";
+
+/**
+ * Direct call form: `x.ensureConnected()`. `[\s\n]*` tolerates `telegram\n  .ensureConnected()`.
+ *
+ * REVIEW FINDING (second pass): indirect forms defeat this — `telegram["ensureConnected"]()`,
+ * `const f = telegram.ensureConnected.bind(telegram); await f()`, `Reflect.apply(...)`. The
+ * bracket and `.bind` forms are matched below. Dynamic dispatch through a variable is NOT
+ * detectable by a text scanner and is accepted as out of scope: this guard is a tripwire
+ * for the ordinary way someone reintroduces the bug, not a proof of boundedness. The
+ * behavioural tests in session-manager-wedge.test.ts are what actually prove the property.
+ */
+const WIRE_CALL = new RegExp(`\\.[\\s\\n]*(${WIRE_METHODS})[\\s\\n]*\\([\\s\\n]*\\)`, "g");
+
+/** Indirect forms that reach the same methods and would otherwise slip past. */
+const INDIRECT_CALL = new RegExp(
+  `(\\[[\\s\\n]*["'\`](${WIRE_METHODS})["'\`][\\s\\n]*\\]|\\.(${WIRE_METHODS})\\.bind\\()`,
+  "g",
+);
 
 /** Markers that make a call site bounded — matched as calls, not as bare words. */
 const BOUNDED = /(withDeadline\s*\(|connectBounded\s*\()/;
@@ -79,7 +109,8 @@ export function findUnboundedCalls(source: string, label = "src"): string[] {
   const lines = code.split("\n");
   const offenders: string[] = [];
 
-  for (const match of code.matchAll(WIRE_CALL)) {
+  const withStrings = stripComments(source);
+  for (const match of [...code.matchAll(WIRE_CALL), ...withStrings.matchAll(INDIRECT_CALL)]) {
     const index = match.index ?? 0;
     const lineNo = code.slice(0, index).split("\n").length;
     // A wrapper either opens on this line or within the few lines above:
@@ -174,5 +205,22 @@ describe("guard self-tests (it must not pass vacuously)", () => {
 
   it("flags an unbounded logOut", () => {
     assert.equal(findUnboundedCalls("const ok = await session.telegram.logOut();").length, 1);
+  });
+
+  it("flags bracket-notation dispatch", () => {
+    // Review finding: `telegram["ensureConnected"]()` used to slip through entirely.
+    assert.equal(findUnboundedCalls('await telegram["ensureConnected"]();').length, 1);
+    assert.equal(findUnboundedCalls("await telegram['connect']();").length, 1);
+  });
+
+  it("flags a bound-method reference", () => {
+    assert.equal(findUnboundedCalls("const f = telegram.ensureConnected.bind(telegram);").length, 1);
+  });
+
+  it("documents the known blind spot: fully dynamic dispatch", () => {
+    // Not detectable from text. Recorded as a test so the limitation is explicit rather
+    // than discovered later by someone trusting the guard more than it deserves.
+    const source = ['const m = "ensure" + "Connected";', "await telegram[m]();"].join("\n");
+    assert.deepEqual(findUnboundedCalls(source), [], "known gap — behavioural tests cover this property");
   });
 });

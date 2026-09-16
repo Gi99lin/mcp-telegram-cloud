@@ -231,7 +231,7 @@ export class SessionManager {
       telegram.setSessionString(decryptSecret(row.session_string));
     }
 
-    const connected = await this.connectBounded(telegram, userId);
+    const connected = (await this.connectBounded(telegram, userId)) === "connected";
 
     // Only add to pool if connection succeeded — don't cache broken sessions
     if (connected) {
@@ -283,17 +283,39 @@ export class SessionManager {
   }
 
   /**
-   * `telegram.connect()` under a deadline. Returns false (rather than throwing) on a
-   * breach so callers keep their existing "connect failed → don't pool it" branch.
+   * `telegram.connect()` under a deadline.
+   *
+   * Tri-state on purpose (review finding, issue #19). "Telegram answered and rejected the
+   * session" and "Telegram did not answer in time" look identical through a boolean, and
+   * one caller — `tryReconnectSessionImpl` — DELETES the persisted `session_string` on the
+   * first. Collapsing a transient network stall into that branch would log the user out for
+   * good, which is a far worse bug than the one being fixed.
    */
-  private async connectBounded(telegram: TelegramService, userId: string): Promise<boolean> {
+  private async connectBounded(
+    telegram: TelegramService,
+    userId: string,
+  ): Promise<"connected" | "rejected" | "timeout"> {
+    // The in-flight promise is captured INSIDE the deadline wrapper, not before it, so the
+    // "every wire call sits inside withDeadline" guard stays true by construction rather
+    // than by exception. It is held because a connect that finishes AFTER the deadline must
+    // still be torn down — otherwise it becomes a live client nobody references, holding a
+    // second connection on the same auth key (review finding).
+    let work: Promise<boolean> | undefined;
     try {
-      return await withDeadline("connect", config.telegramConnectTimeoutMs, () => telegram.connect());
+      const ok = await withDeadline("connect", config.telegramConnectTimeoutMs, () => {
+        work = telegram.connect();
+        return work;
+      });
+      return ok ? "connected" : "rejected";
     } catch (e) {
       if (!isDeadlineError(e)) throw e;
       console.error(`[sessions] connect timed out for ${logUser(userId)} after ${e.timeoutMs}ms`);
+      void work?.then(
+        () => telegram.disconnect().catch(() => {}),
+        () => {},
+      );
       telegram.disconnect().catch(() => {});
-      return false;
+      return "timeout";
     }
   }
 
@@ -564,7 +586,7 @@ export class SessionManager {
     try {
       const telegram = this.telegramFactory(this.apiId, this.apiHash);
       telegram.setSessionString(decryptSecret(row.session_string));
-      await this.connectBounded(telegram, userId);
+      const outcome = await this.connectBounded(telegram, userId);
 
       if (telegram.isConnected()) {
         // Success — replace stale pool entry
@@ -580,7 +602,14 @@ export class SessionManager {
         return telegram;
       }
 
-      // Session invalid — clean up
+      if (outcome === "timeout") {
+        // Telegram never answered — that says nothing about whether the session is still
+        // valid. Keep the row; the next call retries with the same auth key.
+        console.error(`[sessions] tryReconnect: ${logUser(userId)} — connect timed out, keeping session_string`);
+        return null;
+      }
+
+      // Session invalid — Telegram answered and refused it. Only now is deleting safe.
       console.log(`[sessions] tryReconnect: ${logUser(userId)} — session_string invalid, removing`);
       this.db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
       this.sessions.delete(userId);
@@ -801,7 +830,7 @@ export class SessionManager {
       }
       const telegram = this.telegramFactory(this.apiId, this.apiHash);
       telegram.setSessionString(decryptSecret(row.session_string));
-      const connected = await this.connectBounded(telegram, ownerUserId);
+      const connected = (await this.connectBounded(telegram, ownerUserId)) === "connected";
       if (connected) {
         this.sessions.set(key, { telegram, connectedAt: new Date(), lastActivity: new Date() });
       }
