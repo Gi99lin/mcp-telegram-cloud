@@ -109,6 +109,31 @@ export const PROFILE_TOOLS: ToolDefinition[] = [
   },
 
   {
+    name: "telegram-get-saved-music",
+    description:
+      "List the songs pinned to a user's profile (users.GetSavedMusic) — the tracks behind the music row on a Telegram profile. Returns count plus tracks with title, performer, duration, fileName, mimeType and size; element 0 is the track shown on the profile. Defaults to your own profile. Supports pagination via offset/limit and returns nextOffset when more remain. Read-only.",
+    inputSchema: {
+      user: z
+        .string()
+        .optional()
+        .describe("User to query — id, @username, or display name fragment. Defaults to yourself"),
+      offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Max tracks to return per page (default 50, max 100)"),
+    },
+    annotations: READ_ONLY,
+    handler: async ({ user, offset, limit }, { telegram }) => {
+      const result = await telegram.getSavedMusic(safeOpt(user), { offset, limit });
+      return textResult(JSON.stringify(result));
+    },
+  },
+
+  {
     name: "telegram-set-profile-color",
     description:
       "Set your profile name color or profile background color. Requires Telegram Premium for colors above index 6 and for profile background patterns. Omit color to reset to default.",

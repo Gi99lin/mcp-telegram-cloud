@@ -4,7 +4,7 @@
  * MCP hints are how ChatGPT and Claude decide what needs a confirmation, so a
  * wrong one is not cosmetic: `openWorldHint: false` on a tool that delivers a
  * message to another person tells the client the action is contained. This
- * table pins the intended class of all 183 tools, and the last test fails when a
+ * table pins the intended class of all 184 tools, and the last test fails when a
  * new tool is added without a deliberate decision — the failure mode we are
  * guarding against is a tool inheriting a default nobody looked at.
  *
@@ -73,6 +73,7 @@ const EXPECTED: Record<keyof typeof CLASSES, readonly string[]> = {
     "telegram-get-recent-stickers",
     "telegram-get-replies",
     "telegram-get-saved-dialogs",
+    "telegram-get-saved-music",
     "telegram-get-saved-star-gifts",
     "telegram-get-scheduled",
     "telegram-get-sessions",

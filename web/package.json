@@ -12,17 +12,17 @@
     "translate": "bun scripts/translate.ts"
   },
   "dependencies": {
-    "next": "16.3.4",
-    "next-intl": "^4.14.1",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
+    "next": "16.3.5",
+    "next-intl": "^4.14.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "react-icons": "5.7.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.11",
-    "@types/node": "^26.4.0",
-    "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.5",
+    "@biomejs/biome": "^2.5.13",
+    "@types/node": "^26.6.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "typescript": "7.0.2"
   }
 }
