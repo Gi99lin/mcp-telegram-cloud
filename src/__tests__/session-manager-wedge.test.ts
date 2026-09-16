@@ -51,6 +51,9 @@ const never = () => new Promise<never>(() => {});
  */
 class WedgeableTelegramService {
   readonly calls: string[] = [];
+  /** Reasons passed to the upstream `markUnhealthy` — the in-place recovery signal. */
+  readonly unhealthyReasons: string[] = [];
+  lastError = "";
   private connected = false;
   private wedged: "no" | "sticky" | "dropped" = "no";
   private sessionString: string | undefined;
@@ -60,6 +63,13 @@ class WedgeableTelegramService {
 
   wedge(mode: "sticky" | "dropped"): void {
     this.wedged = mode;
+  }
+
+  /** Upstream (core ≥1.42.0) clears its sticky connected flag so the next ensureConnected
+   *  destroys the dead sender and rebuilds from the same session string. */
+  markUnhealthy(reason: string): void {
+    this.unhealthyReasons.push(reason);
+    this.connected = false;
   }
 
   async connect(): Promise<boolean> {
@@ -90,11 +100,18 @@ class WedgeableTelegramService {
   }
 }
 
-/** A healthy client, used as the replacement built after the wedged one is discarded. */
+/** A healthy client. */
 class HealthyTelegramService {
   readonly calls: string[] = [];
+  readonly unhealthyReasons: string[] = [];
+  lastError = "";
   private connected = false;
   private sessionString: string | undefined;
+
+  markUnhealthy(reason: string): void {
+    this.unhealthyReasons.push(reason);
+    this.connected = false;
+  }
 
   async connect(): Promise<boolean> {
     this.calls.push("connect");
@@ -143,15 +160,18 @@ describe("SessionManager — no permanent wedge (issue #19)", () => {
     wedged.wedge("dropped");
 
     const started = Date.now();
-    // Now the socket is half-open: ensureConnected hangs, the deadline fires, the dead
-    // client is discarded and rebuilt from the persisted session string in the same call.
+    // Now the socket is half-open: ensureConnected hangs and the deadline fires.
     const second = await sm.getOrCreateSession("user-A");
     const elapsed = Date.now() - started;
 
     assert.ok(elapsed < 5000, `getOrCreateSession took ${elapsed}ms — the lock was pinned`);
     assert.ok(wedged.calls.includes("ensureConnected"), "the reconnect attempt must have been made");
-    assert.ok(wedged.calls.includes("disconnect"), "dead client must be torn down");
-    assert.equal(second, healthy as unknown as TelegramService, "caller must get the rebuilt client");
+    // Recovery is IN PLACE (review finding): building a replacement here would race the
+    // timed-out client for the same auth key. Upstream's markUnhealthy makes the next
+    // ensureConnected destroy the dead sender and reconnect on this same instance.
+    assert.equal(second, wedged as unknown as TelegramService, "the same client must be reused");
+    assert.equal(wedged.unhealthyReasons.length, 1, "the client must be marked for revalidation");
+    assert.equal(healthy.calls.length, 0, "no second client may be constructed for this user");
   });
 
   it("a second call for the same user is not stuck behind the first one", async () => {
@@ -171,19 +191,18 @@ describe("SessionManager — no permanent wedge (issue #19)", () => {
     assert.ok(Date.now() - started < 5000, "the queue behind the wedged call never drained");
   });
 
-  it("rebuilding preserves the persisted session string (no re-login)", async () => {
+  it("recovery never touches the persisted session string (no re-login)", async () => {
     const wedged = new WedgeableTelegramService();
-    const healthy = new HealthyTelegramService();
-    const { sm } = makeManager([wedged, healthy]);
+    const { sm } = makeManager([wedged]);
     sm.saveSessionString("user-C", "session-C");
     await sm.getOrCreateSession("user-C");
     wedged.wedge("dropped");
 
     await sm.getOrCreateSession("user-C");
 
-    // The whole point of a memory-only rebuild: same auth key, user sees nothing.
-    assert.equal(healthy.getSessionString(), "session-C");
-    assert.ok(sm.getSavedUserIds().includes("user-C"), "session row must survive the rebuild");
+    // Memory-only recovery: same auth key, nothing revoked, user sees nothing.
+    assert.ok(sm.getSavedUserIds().includes("user-C"), "session row must survive recovery");
+    assert.equal(wedged.getSessionString(), "session-C", "the session string must stay loaded");
   });
 
   it("a connect() that never settles does not pin the lock either", async () => {
@@ -199,7 +218,7 @@ describe("SessionManager — no permanent wedge (issue #19)", () => {
 });
 
 describe("SessionManager.markUnhealthy (issue #19)", () => {
-  it("drops the pooled client but keeps the persisted session", async () => {
+  it("marks the pooled client for revalidation without dropping it or the persisted session", async () => {
     const healthy = new HealthyTelegramService();
     const { sm } = makeManager([healthy]);
     sm.saveSessionString("user-E", "session-E");
@@ -209,30 +228,28 @@ describe("SessionManager.markUnhealthy (issue #19)", () => {
 
     sm.markUnhealthy("user-E");
 
-    assert.equal(sm.getSession("user-E"), undefined, "in-memory client must be gone");
+    assert.equal(sm.getSession("user-E"), healthy as unknown as TelegramService, "entry stays — one client per user");
+    assert.equal(healthy.unhealthyReasons.length, 1, "the client must be told to revalidate");
     assert.ok(sm.getSavedUserIds().includes("user-E"), "session_string must NOT be deleted");
-    assert.ok(healthy.calls.includes("disconnect"), "old client should be torn down");
   });
 
-  it("handles a sticky-connected half-open client: timeout → markUnhealthy → next call rebuilds", async () => {
-    // isConnected() lies (returns true), so no reconnect is attempted and the hang happens
-    // inside the tool handler. The tool-level deadline calls markUnhealthy; the NEXT call
-    // must then produce a working client.
+  it("breaks the sticky-connected half-open case: the lying flag is cleared", async () => {
+    // isConnected() lies (returns true), so no reconnect is attempted and the hang lands in
+    // the tool handler. Before the fix nothing ever cleared that flag, so the user stayed
+    // broken indefinitely; markUnhealthy is what makes the next call revalidate.
     const wedged = new WedgeableTelegramService();
-    const healthy = new HealthyTelegramService();
-    const { sm } = makeManager([wedged, healthy]);
+    const { sm } = makeManager([wedged]);
     sm.saveSessionString("user-F", "session-F");
 
     await sm.getOrCreateSession("user-F");
     wedged.wedge("sticky");
-    const first = await sm.getOrCreateSession("user-F");
-    assert.equal(first, wedged as unknown as TelegramService, "sticky flag means it is handed out as-is");
+    assert.equal(sm.getSession("user-F"), wedged as unknown as TelegramService);
+    assert.equal(wedged.isConnected(), true, "precondition: the flag lies");
 
     sm.markUnhealthy("user-F");
-    const second = await sm.getOrCreateSession("user-F");
 
-    assert.equal(second, healthy as unknown as TelegramService, "next call must get a fresh client");
-    assert.equal(healthy.getSessionString(), "session-F");
+    assert.deepEqual(wedged.unhealthyReasons, ["tool call exceeded its deadline"]);
+    assert.equal(sm.getSession("user-F"), wedged as unknown as TelegramService, "still one client for this user");
   });
 
   it("is a no-op for a user with no pooled session", () => {
@@ -240,29 +257,27 @@ describe("SessionManager.markUnhealthy (issue #19)", () => {
     assert.doesNotThrow(() => sm.markUnhealthy("nobody"));
   });
 
-  it("a stale timeout does not evict a session that was already rebuilt (fencing)", async () => {
+  it("a stale timeout does not touch a session that was already replaced (fencing)", async () => {
     // Review finding: deadlines fire on the caller's clock, so a timeout report can arrive
-    // after a concurrent call replaced the client. Without fencing, the late report would
-    // throw away a healthy session — and a retrying agent could do it over and over.
+    // after a concurrent flow replaced the client. Without fencing, the late report would
+    // knock a healthy connection offline — and a retrying agent could do it repeatedly.
     const first = new HealthyTelegramService();
     const second = new HealthyTelegramService();
-    const { sm } = makeManager([first, second]);
+    const { sm } = makeManager([]);
     sm.saveSessionString("user-G", "session-G");
 
-    await sm.getOrCreateSession("user-G");
-    // Session is rebuilt by someone else (e.g. an earlier timeout already handled it).
-    sm.markUnhealthy("user-G", first as unknown as TelegramService);
-    const rebuilt = await sm.getOrCreateSession("user-G");
-    assert.equal(rebuilt, second as unknown as TelegramService);
+    await sm.adoptSession("user-G", first as unknown as TelegramService);
+    await sm.adoptSession("user-G", second as unknown as TelegramService);
+    assert.equal(sm.getSession("user-G"), second as unknown as TelegramService, "precondition: pool moved on");
 
     // The late report names the OLD client — it must be ignored.
     sm.markUnhealthy("user-G", first as unknown as TelegramService);
 
+    assert.equal(second.unhealthyReasons.length, 0, "the live client must not be knocked offline");
     assert.equal(sm.getSession("user-G"), second as unknown as TelegramService, "healthy session must survive");
-    assert.ok(!second.calls.includes("disconnect"), "the rebuilt client must not be torn down");
   });
 
-  it("still evicts when the report names the currently pooled client", async () => {
+  it("still acts when the report names the currently pooled client", async () => {
     const only = new HealthyTelegramService();
     const { sm } = makeManager([only]);
     sm.saveSessionString("user-H", "session-H");
@@ -270,7 +285,7 @@ describe("SessionManager.markUnhealthy (issue #19)", () => {
 
     sm.markUnhealthy("user-H", only as unknown as TelegramService);
 
-    assert.equal(sm.getSession("user-H"), undefined);
+    assert.equal(only.unhealthyReasons.length, 1);
   });
 });
 
@@ -288,21 +303,43 @@ describe("tryReconnectSession must not confuse 'slow' with 'invalid' (review fin
     assert.ok(sm.getSavedUserIds().includes("user-J"), "session_string must survive a timeout");
   });
 
-  it("still deletes the session string when Telegram actually rejects it", async () => {
-    // The delete path must stay alive: an auth key Telegram refuses is dead weight.
-    class RejectingTelegramService extends HealthyTelegramService {
+  it("keeps the persisted session string when connect fails without a revocation reason", async () => {
+    // THE review finding: upstream `connect()` returns false for network failures and
+    // duplicate auth keys too, not only for revoked sessions. Deleting on a bare `false`
+    // turned a transient outage into a forced re-login.
+    class FlakyNetworkTelegramService extends HealthyTelegramService {
       override async connect(): Promise<boolean> {
         this.calls.push("connect");
-        return false; // Telegram answered: session no longer valid
+        this.lastError = "Error: connection closed (TIMEOUT)";
+        return false;
       }
     }
-    const { sm } = makeManager([new RejectingTelegramService()]);
+    const { sm } = makeManager([new FlakyNetworkTelegramService()]);
     sm.saveSessionString("user-K", "session-K");
 
     const result = await sm.tryReconnectSession("user-K");
 
     assert.equal(result, null);
-    assert.ok(!sm.getSavedUserIds().includes("user-K"), "a rejected session must still be cleaned up");
+    assert.ok(sm.getSavedUserIds().includes("user-K"), "a network failure must not destroy credentials");
+  });
+
+  it("still deletes the session string when Telegram names a revocation reason", async () => {
+    // The delete path must stay alive: an auth key Telegram refuses is dead weight, and
+    // keeping it would make every later call fail the same way.
+    class RevokedTelegramService extends HealthyTelegramService {
+      override async connect(): Promise<boolean> {
+        this.calls.push("connect");
+        this.lastError = "RPCError: 401: AUTH_KEY_UNREGISTERED";
+        return false;
+      }
+    }
+    const { sm } = makeManager([new RevokedTelegramService()]);
+    sm.saveSessionString("user-L", "session-L");
+
+    const result = await sm.tryReconnectSession("user-L");
+
+    assert.equal(result, null);
+    assert.ok(!sm.getSavedUserIds().includes("user-L"), "a revoked session must still be cleaned up");
   });
 });
 

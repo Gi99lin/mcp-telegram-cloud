@@ -15,7 +15,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
 
 const { registerAllTools, toolBudgetMs, stageBudgetMs, SLOW_TOOLS } = await import("../tool-registry.js");
-const { READ_ONLY, textResult } = await import("../tools/helpers.js");
+const { READ_ONLY, DESTRUCTIVE_PUBLIC: DESTRUCTIVE, textResult } = await import("../tools/helpers.js");
 const { config } = await import("../config.js");
 
 /**
@@ -55,6 +55,7 @@ function harness(opts: {
   handler: () => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>;
   requireConnection?: () => Promise<string | null>;
   toolName?: string;
+  destructive?: boolean;
 }) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   const callbacks = new Map<string, Callback>();
@@ -66,13 +67,14 @@ function harness(opts: {
   };
 
   const timeouts: string[] = [];
+  const audit: { tool: string; result: string }[] = [];
   registerAllTools(
     server,
     [
       {
         name: opts.toolName ?? "slow-tool",
         description: "test tool",
-        annotations: READ_ONLY,
+        annotations: opts.destructive ? DESTRUCTIVE : READ_ONLY,
         handler: opts.handler,
       },
     ],
@@ -80,13 +82,15 @@ function harness(opts: {
       getTelegram: () => ({}) as TelegramService,
       requireConnection: opts.requireConnection ?? (async () => null),
       onToolTimeout: (tool: string) => timeouts.push(tool),
+      checkDestructive: () => null,
+      recordDestructive: (tool: string, _args: unknown, result: "ok" | "error") => audit.push({ tool, result }),
     },
   );
 
   const name = opts.toolName ?? "slow-tool";
   const callback = callbacks.get(name);
   assert.ok(callback, `tool ${name} was not registered`);
-  return { call: () => callback({} as unknown), timeouts };
+  return { call: () => callback({} as unknown), timeouts, audit };
 }
 
 describe("tool deadline (issue #19)", () => {
@@ -161,6 +165,25 @@ describe("tool deadline (issue #19)", () => {
     assert.equal(res.isError, true);
     assert.match(res.content[0]?.text ?? "", /CHAT_NOT_FOUND/);
     assert.deepEqual(timeouts, [], "a plain failure must not drop the user's session");
+  });
+
+  it("a destructive tool that times out at connect still writes an audit row", async () => {
+    // Review finding: `checkDestructive` had already authorised (and rate-charged) the call,
+    // but the early return on a connect timeout skipped `recordDestructive` — leaving the
+    // audit trail showing an approved destructive action with no outcome.
+    const { call, audit } = harness({
+      destructive: true,
+      handler: async () => textResult("unreachable"),
+      requireConnection: never,
+    });
+    await call();
+    assert.deepEqual(audit, [{ tool: "slow-tool", result: "error" }]);
+  });
+
+  it("a destructive tool that times out in the handler writes exactly one audit row", async () => {
+    const { call, audit } = harness({ destructive: true, handler: never });
+    await call();
+    assert.deepEqual(audit, [{ tool: "slow-tool", result: "error" }], "no double-counting");
   });
 
   it("a connect-stage breach falls back to the connect budget, not the tool budget", async () => {

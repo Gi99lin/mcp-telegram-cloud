@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
+import { isAuthError } from "./auth-errors.js";
 // Aliased: `config` is shadowed by a local per-tool registration object below.
 import { config as appConfig } from "./config.js";
 import { isDeadlineError, withDeadline } from "./deadline.js";
@@ -82,20 +83,6 @@ export interface ToolDefinition<TShape extends ZodRawShapeCompat = ZodRawShapeCo
   handler: (args: Args<TShape>, deps: ToolDeps) => Promise<CallToolResult>;
   /** Custom error mapper. Return a result to short-circuit, null to fall through to default. */
   onError?: (e: unknown) => CallToolResult | null;
-}
-
-const AUTH_ERROR_PATTERNS = [
-  "AUTH_KEY_UNREGISTERED",
-  "AUTH_KEY_INVALID",
-  "SESSION_REVOKED",
-  "SESSION_EXPIRED",
-  "USER_DEACTIVATED",
-  "USER_DEACTIVATED_BAN",
-];
-
-function isAuthError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message : String(error);
-  return AUTH_ERROR_PATTERNS.some((p) => msg.includes(p));
 }
 
 /**
@@ -316,6 +303,12 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
           // No client handle exists yet at this stage — the hang happened while obtaining
           // one — so the hook falls back to dropping whatever is currently pooled.
           reportTimeout(tool.name, e.timeoutMs, "connect", opts.onToolTimeout);
+          if (isDestructive) {
+            // Review finding: `checkDestructive` already approved (and charged) this call,
+            // so returning here without a result row left the audit trail claiming a
+            // destructive action was authorised and never resolved.
+            opts.recordDestructive?.(tool.name, args, "error");
+          }
           return {
             content: [{ type: "text", text: timeoutMessage(tool.name, e.timeoutMs, "connect") }],
             isError: true,

@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { randomBytes } from "node:crypto";
 import { TelegramService } from "@overpod/mcp-telegram/service";
+import { isAuthErrorMessage } from "./auth-errors.js";
 import { config } from "./config.js";
 import { decryptSecret, encryptionEnabled, encryptSecret, hashToken, isEncrypted } from "./crypto.js";
 import { isDeadlineError, withDeadline } from "./deadline.js";
@@ -200,24 +201,27 @@ export class SessionManager {
       if (!existing.telegram.isConnected()) {
         // issue #19: this await runs INSIDE the per-user lock. Unbounded, a half-open
         // socket pinned the lock chain forever and every later call for this user queued
-        // behind a promise that never settled. Bounded, the worst case is one slow call
-        // that then throws the dead client away and rebuilds below.
+        // behind a promise that never settled.
         try {
           await withDeadline("ensureConnected", config.telegramConnectTimeoutMs, () =>
             existing.telegram.ensureConnected(),
           );
-          return existing.telegram;
         } catch (e) {
           if (!isDeadlineError(e)) throw e;
+          // Recover IN PLACE rather than building a second TelegramService (review
+          // finding): a replacement would race the old, still-unreferenced client for the
+          // same auth key, and Telegram answers that with AUTH_KEY_DUPLICATED — trading a
+          // wedge for a different way to be unusable. Upstream's `markUnhealthy` clears the
+          // sticky connected flag so the NEXT `ensureConnected()` runs `dropDeadClient()`
+          // (destroy the dead sender) and rebuilds from the same session string, one client
+          // throughout. That next attempt is itself bounded by the caller's deadline.
+          existing.telegram.markUnhealthy(`ensureConnected exceeded ${e.timeoutMs}ms`);
           console.error(
-            `[sessions] ensureConnected timed out for ${logUser(userId)}, discarding pooled client and rebuilding`,
+            `[sessions] ensureConnected timed out for ${logUser(userId)} — client marked unhealthy, next call rebuilds it`,
           );
-          this.discardPooled(userId);
-          // fall through to the rebuild-from-SQLite path below
         }
-      } else {
-        return existing.telegram;
       }
+      return existing.telegram;
     }
 
     const telegram = this.telegramFactory(this.apiId, this.apiHash);
@@ -245,41 +249,6 @@ export class SessionManager {
     }
 
     return telegram;
-  }
-
-  /**
-   * issue #19 — drop a pool entry whose client is unusable, WITHOUT touching persisted
-   * state. The encrypted `session_string` stays in SQLite, Telegram is never logged out
-   * and OAuth is never revoked, so the very next call rebuilds a fresh `TelegramService`
-   * from the same auth key and the user never sees a re-login prompt.
-   *
-   * Callers must already hold the lock for `key` (or be outside the lock discipline
-   * entirely, as `markUnhealthy` is), because this only mutates the Map.
-   */
-  private discardPooled(key: string): void {
-    const pooled = this.sessions.get(key);
-    if (!pooled) return;
-    this.sessions.delete(key);
-    // Fire-and-forget: the whole point is that this client is unresponsive, so awaiting
-    // its teardown would reintroduce the hang we are removing.
-    //
-    // ACCEPTED TRADE-OFF (review finding, issue #19): because the socket cannot be force
-    // -killed, a teardown that never completes leaves the old, unreferenced client alive
-    // while the replacement connects — briefly two connections on one auth key, which
-    // Telegram can answer with AUTH_KEY_DUPLICATED. We take that over the alternative,
-    // which is the reported bug: the user stays wedged until the container restarts.
-    // The window is made VISIBLE rather than assumed away — a teardown that misses its
-    // deadline is logged, so a rise in duplicate-key errors can be traced to it.
-    void withDeadline("disconnect", config.telegramConnectTimeoutMs, () => pooled.telegram.disconnect()).catch(
-      (err: unknown) => {
-        if (isDeadlineError(err)) {
-          console.error(
-            `[sessions] discarded client for ${logUser(key)} did not finish disconnecting within ${err.timeoutMs}ms — ` +
-              "it may briefly hold a second connection on the same auth key",
-          );
-        }
-      },
-    );
   }
 
   /**
@@ -346,9 +315,14 @@ export class SessionManager {
       console.log(`[sessions] Ignoring stale timeout for ${logUser(ownerUserId)} — pooled client was already replaced`);
       return;
     }
-    this.discardPooled(key);
+    // The pool ENTRY stays (review finding): evicting it made the next call construct a
+    // second TelegramService while the timed-out one was potentially still alive on the same
+    // auth key, which Telegram answers with AUTH_KEY_DUPLICATED — a different way to be
+    // unusable. Marking the existing client keeps exactly one client per user and lets
+    // upstream destroy its dead sender before reconnecting from the same session string.
+    pooled.telegram.markUnhealthy("tool call exceeded its deadline");
     console.log(
-      `[sessions] Marked ${logUser(ownerUserId)} unhealthy after tool timeout — pooled client dropped, session string kept`,
+      `[sessions] Marked ${logUser(ownerUserId)} unhealthy after tool timeout — next call revalidates the connection`,
     );
   }
 
@@ -609,6 +583,17 @@ export class SessionManager {
         return null;
       }
 
+      // `connect()` returning false is NOT proof the session is dead (review finding):
+      // upstream returns false for network failures, duplicate auth keys and unknown
+      // errors too. Deleting on that turns a transient outage into a forced re-login, so
+      // the row is destroyed only when Telegram named a revocation reason.
+      if (!isAuthErrorMessage(telegram.lastError)) {
+        console.error(
+          `[sessions] tryReconnect: ${logUser(userId)} — connect failed without a revocation reason, keeping session_string`,
+        );
+        return null;
+      }
+
       // Session invalid — Telegram answered and refused it. Only now is deleting safe.
       console.log(`[sessions] tryReconnect: ${logUser(userId)} — session_string invalid, removing`);
       this.db.prepare("DELETE FROM user_sessions WHERE user_id = ?").run(userId);
@@ -801,23 +786,21 @@ export class SessionManager {
       if (pooled) {
         pooled.lastActivity = new Date();
         if (!pooled.telegram.isConnected()) {
-          // Same lock-pinning hazard as the primary path (issue #19), same bound.
+          // Same lock-pinning hazard as the primary path (issue #19), same bound, same
+          // in-place recovery so one account never ends up with two live clients.
           try {
             await withDeadline("ensureConnected", config.telegramConnectTimeoutMs, () =>
               pooled.telegram.ensureConnected(),
             );
-            return pooled.telegram;
           } catch (e) {
             if (!isDeadlineError(e)) throw e;
+            pooled.telegram.markUnhealthy(`ensureConnected exceeded ${e.timeoutMs}ms`);
             console.error(
-              `[sessions] ensureConnected timed out for secondary account of ${logUser(ownerUserId)}, rebuilding`,
+              `[sessions] ensureConnected timed out for secondary account of ${logUser(ownerUserId)} — marked unhealthy`,
             );
-            this.discardPooled(key);
-            // fall through and rebuild from telegram_accounts below
           }
-        } else {
-          return pooled.telegram;
         }
+        return pooled.telegram;
       }
       const row = this.db
         .prepare("SELECT session_string FROM telegram_accounts WHERE owner_user_id = ? AND account_id = ?")
