@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import type { TelegramService } from "@overpod/mcp-telegram/service";
 import { config, iconPng256Url, iconPngUrl, iconUrl } from "./config.js";
 import { isDeadlineError, withDeadline } from "./deadline.js";
 import { type DestructiveGuard, summarizeArgs } from "./destructive-guard.js";
@@ -475,14 +476,17 @@ async function handleMcpRequestInner(
    * Telegram and force the user through OAuth again for what may be a transient network
    * fault.
    */
-  const onToolTimeout = (toolName: string) => {
+  const onToolTimeout = (toolName: string, client?: TelegramService) => {
     logger.warn(`Dropping in-memory Telegram client after ${toolName} timeout`, {
       component: "cloud",
       userId: logUser(userId),
       event: "session.unhealthy",
       tool: toolName,
     });
-    sessions.markUnhealthy(userId);
+    // `client` fences the drop to the instance that actually timed out, so a late report
+    // cannot evict a session a concurrent call already rebuilt (review finding). It is
+    // absent only for connect-stage timeouts, where no handle was ever obtained.
+    sessions.markUnhealthy(userId, client);
   };
 
   const onSessionRevoked = async () => {

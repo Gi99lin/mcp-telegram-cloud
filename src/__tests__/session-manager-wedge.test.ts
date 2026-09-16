@@ -16,16 +16,27 @@
 process.env.ISSUER ??= "https://session-wedge-test.invalid";
 process.env.TELEGRAM_API_ID ??= "12345";
 process.env.TELEGRAM_API_HASH ??= "test-hash";
-process.env.TELEGRAM_CONNECT_TIMEOUT_MS = "50";
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
 import type { SessionManager as SessionManagerType } from "../session-manager.js";
 
 const { SessionManager } = (await import("../session-manager.js")) as {
   SessionManager: typeof SessionManagerType;
 };
+const { config } = await import("../config.js");
+
+// Overridden on the object, not via env: `bun test` shares one process across test files,
+// so `config.ts` is initialised by whichever file imports it first and an env var set here
+// is silently ignored when another file wins the race. See tool-timeout.test.ts.
+const ORIGINAL_CONNECT_MS = config.telegramConnectTimeoutMs;
+beforeEach(() => {
+  config.telegramConnectTimeoutMs = 50;
+});
+afterEach(() => {
+  config.telegramConnectTimeoutMs = ORIGINAL_CONNECT_MS;
+});
 
 const never = () => new Promise<never>(() => {});
 
@@ -227,5 +238,72 @@ describe("SessionManager.markUnhealthy (issue #19)", () => {
   it("is a no-op for a user with no pooled session", () => {
     const { sm } = makeManager([]);
     assert.doesNotThrow(() => sm.markUnhealthy("nobody"));
+  });
+
+  it("a stale timeout does not evict a session that was already rebuilt (fencing)", async () => {
+    // Review finding: deadlines fire on the caller's clock, so a timeout report can arrive
+    // after a concurrent call replaced the client. Without fencing, the late report would
+    // throw away a healthy session — and a retrying agent could do it over and over.
+    const first = new HealthyTelegramService();
+    const second = new HealthyTelegramService();
+    const { sm } = makeManager([first, second]);
+    sm.saveSessionString("user-G", "session-G");
+
+    await sm.getOrCreateSession("user-G");
+    // Session is rebuilt by someone else (e.g. an earlier timeout already handled it).
+    sm.markUnhealthy("user-G", first as unknown as TelegramService);
+    const rebuilt = await sm.getOrCreateSession("user-G");
+    assert.equal(rebuilt, second as unknown as TelegramService);
+
+    // The late report names the OLD client — it must be ignored.
+    sm.markUnhealthy("user-G", first as unknown as TelegramService);
+
+    assert.equal(sm.getSession("user-G"), second as unknown as TelegramService, "healthy session must survive");
+    assert.ok(!second.calls.includes("disconnect"), "the rebuilt client must not be torn down");
+  });
+
+  it("still evicts when the report names the currently pooled client", async () => {
+    const only = new HealthyTelegramService();
+    const { sm } = makeManager([only]);
+    sm.saveSessionString("user-H", "session-H");
+    await sm.getOrCreateSession("user-H");
+
+    sm.markUnhealthy("user-H", only as unknown as TelegramService);
+
+    assert.equal(sm.getSession("user-H"), undefined);
+  });
+});
+
+describe("destroyUserSession stays bounded (issue #19 review finding)", () => {
+  it("completes even when both logOut and disconnect hang", async () => {
+    // The logOut path was bounded, but its FAILURE path awaited `disconnect()` unbounded —
+    // inside the per-user lock. A user hitting "Disconnect" on a half-open socket would
+    // wedge exactly as before.
+    class HangingOnTeardown extends WedgeableTelegramService {
+      async logOut(): Promise<boolean> {
+        return never();
+      }
+      override async disconnect(): Promise<void> {
+        return never();
+      }
+    }
+    const hanging = new HangingOnTeardown();
+    const { sm } = makeManager([hanging]);
+    sm.saveSessionString("user-I", "session-I");
+    await sm.getOrCreateSession("user-I");
+
+    const started = Date.now();
+    const result = await sm.destroyUserSession("user-I");
+    assert.ok(Date.now() - started < 5000, "destroyUserSession hung on teardown");
+    assert.equal(result.loggedOut, false);
+
+    // Local state must be gone regardless of what Telegram did.
+    assert.equal(sm.getSession("user-I"), undefined);
+    assert.ok(!sm.getSavedUserIds().includes("user-I"), "destroy must still wipe the persisted session");
+
+    // And the user is not wedged afterwards.
+    const afterwards = Date.now();
+    await sm.getOrCreateSession("user-I");
+    assert.ok(Date.now() - afterwards < 5000, "the per-user lock was pinned by the hung teardown");
   });
 });

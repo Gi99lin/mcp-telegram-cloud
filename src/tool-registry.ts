@@ -21,7 +21,7 @@ export type OnSessionRevoked = () => Promise<void>;
  * call rebuilds it from the persisted session string. Non-destructive by contract: it must
  * never log out of Telegram, revoke OAuth, or delete the stored session.
  */
-export type OnToolTimeout = (toolName: string) => void;
+export type OnToolTimeout = (toolName: string, client?: TelegramService) => void;
 export type RateLimitCheck = (toolName: string) => string | null;
 export type OnToolCall = (toolName: string) => void;
 /** Phase 2.1 hook for tools whose annotation has `destructiveHint=true`. Returns
@@ -135,6 +135,13 @@ export function toolBudgetMs(toolName: string): number {
   return SLOW_TOOLS.has(toolName) ? appConfig.toolTimeoutSlowMs : appConfig.toolTimeoutMs;
 }
 
+/** Budget that applies at a given stage — used only as a fallback when a deadline error
+ *  arrives without its own `timeoutMs` (cross-module-instance case). Exported for the test
+ *  that pins the review finding: a connect-stage breach must not report the tool budget. */
+export function stageBudgetMs(toolName: string, stage: "connect" | "handler"): number {
+  return stage === "connect" ? appConfig.telegramConnectTimeoutMs : toolBudgetMs(toolName);
+}
+
 /**
  * Log + count a deadline breach and hand the session to `onToolTimeout` for a
  * memory-only rebuild. Never throws: self-healing is best-effort and must not turn a
@@ -145,8 +152,12 @@ function reportTimeout(
   timeoutMs: number,
   stage: "connect" | "handler",
   onToolTimeout: OnToolTimeout | undefined,
+  client?: TelegramService,
 ): void {
-  const budget = Number.isFinite(timeoutMs) ? timeoutMs : toolBudgetMs(toolName);
+  // Fallback must match the STAGE that timed out (review finding): using the tool budget
+  // for a connect-stage breach reported "timed out at connect after 180000ms" when the
+  // connect budget was 15s, which would send an operator hunting the wrong knob.
+  const budget = Number.isFinite(timeoutMs) ? timeoutMs : stageBudgetMs(toolName, stage);
   logger.warn(`Tool ${toolName} timed out at ${stage} after ${budget}ms`, {
     component: "tools",
     event: "tool.timeout",
@@ -156,7 +167,7 @@ function reportTimeout(
   });
   incr(TOOL_TIMEOUTS, { tool: toolName, stage });
   try {
-    onToolTimeout?.(toolName);
+    onToolTimeout?.(toolName, client);
   } catch (err) {
     logger.error(`onToolTimeout hook failed for ${toolName}: ${(err as Error).message}`, {
       component: "tools",
@@ -171,12 +182,12 @@ function reportTimeout(
  * Telegram call may still land. The wording says so explicitly, because the failure mode
  * we are guarding against is an agent "retrying" a send that already went through.
  */
-function timeoutMessage(toolName: string, timeoutMs: number): string {
+function timeoutMessage(toolName: string, timeoutMs: number, stage: "connect" | "handler" = "handler"): string {
   // `isDeadlineError` also accepts a same-named error from another module instance, which
   // may not carry our fields — never render `NaNs` into a user-facing string.
   const seconds = Number.isFinite(timeoutMs)
     ? Math.round(timeoutMs / 1000)
-    : Math.round(appConfig.toolTimeoutMs / 1000);
+    : Math.round(stageBudgetMs(toolName, stage) / 1000);
   return (
     `Telegram did not answer ${toolName} within ${seconds}s, so the call was abandoned. ` +
     "The connection has been reset and the next call will reconnect automatically. " +
@@ -302,8 +313,13 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
           );
         } catch (e) {
           if (!isDeadlineError(e)) throw e;
+          // No client handle exists yet at this stage — the hang happened while obtaining
+          // one — so the hook falls back to dropping whatever is currently pooled.
           reportTimeout(tool.name, e.timeoutMs, "connect", opts.onToolTimeout);
-          return { content: [{ type: "text", text: timeoutMessage(tool.name, e.timeoutMs) }], isError: true };
+          return {
+            content: [{ type: "text", text: timeoutMessage(tool.name, e.timeoutMs, "connect") }],
+            isError: true,
+          };
         }
         if (connErr) return { content: [{ type: "text", text: connErr }] };
       }
@@ -322,6 +338,10 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
           attributes: { component: "mcp", "mcp.tool": tool.name },
         },
         async (span) => {
+          // Hoisted out of the try so the catch can fence the timeout report to the exact
+          // client this call used (review finding): reporting against "whatever is pooled
+          // now" can discard a session that a concurrent call already rebuilt.
+          let handlerClient: TelegramService | undefined;
           try {
             // For tools that skip requireConnection (e.g. accounts-list runs
             // even when no Telegram session is alive) `getTelegram()` can throw.
@@ -339,6 +359,7 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
               // other ~170 tools rather than forcing a null check into every one of them.
               telegram = undefined as unknown as TelegramService;
             }
+            handlerClient = telegram;
             const deps: ToolDeps = {
               telegram,
               ...(opts.userId !== undefined && { userId: opts.userId }),
@@ -388,8 +409,11 @@ export function registerAllTools(server: McpServer, tools: readonly ToolDefiniti
               opts.recordDestructive?.(tool.name, args, "error");
             }
             if (timedOut) {
-              reportTimeout(tool.name, e.timeoutMs, "handler", opts.onToolTimeout);
-              return { content: [{ type: "text", text: timeoutMessage(tool.name, e.timeoutMs) }], isError: true };
+              reportTimeout(tool.name, e.timeoutMs, "handler", opts.onToolTimeout, handlerClient);
+              return {
+                content: [{ type: "text", text: timeoutMessage(tool.name, e.timeoutMs, "handler") }],
+                isError: true,
+              };
             }
             const custom = tool.onError?.(e);
             if (custom) return custom;

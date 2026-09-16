@@ -8,17 +8,43 @@
 process.env.ISSUER ??= "https://tool-timeout-test.invalid";
 process.env.TELEGRAM_API_ID ??= "1";
 process.env.TELEGRAM_API_HASH ??= "stub";
-process.env.TOOL_TIMEOUT_MS = "40";
-process.env.TOOL_TIMEOUT_SLOW_MS = "400";
-process.env.TELEGRAM_CONNECT_TIMEOUT_MS = "40";
 
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { TelegramService } from "@overpod/mcp-telegram/service";
 
-const { registerAllTools, toolBudgetMs, SLOW_TOOLS } = await import("../tool-registry.js");
+const { registerAllTools, toolBudgetMs, stageBudgetMs, SLOW_TOOLS } = await import("../tool-registry.js");
 const { READ_ONLY, textResult } = await import("../tools/helpers.js");
+const { config } = await import("../config.js");
+
+/**
+ * Budgets are overridden on the config object, NOT through env.
+ *
+ * `bun test` evaluates every test file in ONE process, so `config.ts` is initialised from
+ * whichever file imported it first: setting `TOOL_TIMEOUT_MS` here only worked when this
+ * file happened to run first, and silently fell back to the 180s production budget
+ * otherwise (which made these tests hang instead of assert). The budget getters read
+ * `config` at call time, so mutating it per-test is deterministic — and restoring it keeps
+ * the other 700-odd tests in the shared process unaffected.
+ */
+const ORIGINAL = {
+  tool: config.toolTimeoutMs,
+  slow: config.toolTimeoutSlowMs,
+  connect: config.telegramConnectTimeoutMs,
+};
+
+beforeEach(() => {
+  config.toolTimeoutMs = 40;
+  config.toolTimeoutSlowMs = 400;
+  config.telegramConnectTimeoutMs = 30;
+});
+
+afterEach(() => {
+  config.toolTimeoutMs = ORIGINAL.tool;
+  config.toolTimeoutSlowMs = ORIGINAL.slow;
+  config.telegramConnectTimeoutMs = ORIGINAL.connect;
+});
 
 type Callback = (args: unknown) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>;
 
@@ -135,6 +161,17 @@ describe("tool deadline (issue #19)", () => {
     assert.equal(res.isError, true);
     assert.match(res.content[0]?.text ?? "", /CHAT_NOT_FOUND/);
     assert.deepEqual(timeouts, [], "a plain failure must not drop the user's session");
+  });
+
+  it("a connect-stage breach falls back to the connect budget, not the tool budget", async () => {
+    // Review finding: `isDeadlineError` also accepts a same-named error from another module
+    // instance, which may carry no `timeoutMs`. The fallback used to be the tool budget, so
+    // a 30ms connect breach was reported as "timed out at connect after 180000ms" and would
+    // send an operator to the wrong env knob.
+    assert.equal(stageBudgetMs("telegram-read-messages", "connect"), 30);
+    assert.equal(stageBudgetMs("telegram-read-messages", "handler"), 40);
+    assert.equal(stageBudgetMs("telegram-download-media", "connect"), 30, "stage wins over the slow-tool list");
+    assert.equal(stageBudgetMs("telegram-download-media", "handler"), 400);
   });
 
   it("byte-moving tools get the long budget, ordinary tools the short one", async () => {

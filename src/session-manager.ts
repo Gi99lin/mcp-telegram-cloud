@@ -262,7 +262,24 @@ export class SessionManager {
     this.sessions.delete(key);
     // Fire-and-forget: the whole point is that this client is unresponsive, so awaiting
     // its teardown would reintroduce the hang we are removing.
-    pooled.telegram.disconnect().catch(() => {});
+    //
+    // ACCEPTED TRADE-OFF (review finding, issue #19): because the socket cannot be force
+    // -killed, a teardown that never completes leaves the old, unreferenced client alive
+    // while the replacement connects — briefly two connections on one auth key, which
+    // Telegram can answer with AUTH_KEY_DUPLICATED. We take that over the alternative,
+    // which is the reported bug: the user stays wedged until the container restarts.
+    // The window is made VISIBLE rather than assumed away — a teardown that misses its
+    // deadline is logged, so a rise in duplicate-key errors can be traced to it.
+    void withDeadline("disconnect", config.telegramConnectTimeoutMs, () => pooled.telegram.disconnect()).catch(
+      (err: unknown) => {
+        if (isDeadlineError(err)) {
+          console.error(
+            `[sessions] discarded client for ${logUser(key)} did not finish disconnecting within ${err.timeoutMs}ms — ` +
+              "it may briefly hold a second connection on the same auth key",
+          );
+        }
+      },
+    );
   }
 
   /**
@@ -289,11 +306,24 @@ export class SessionManager {
    *
    * Deliberately fire-and-forget and lock-free: it is called from the error path of a call
    * that just timed out, and must not itself block or throw.
+   *
+   * FENCING (review finding, issue #19): a deadline fires on the CALLER's clock, so a
+   * timeout report can arrive long after the session was already rebuilt — or after the
+   * user switched accounts. Dropping whatever is pooled "now" would then throw away a
+   * healthy client and, under a retrying agent, could do so repeatedly. `expected` pins the
+   * decision to the exact instance that timed out: if the pool has moved on, this is a
+   * no-op. Callers that genuinely cannot name the instance (connect-stage timeouts, where
+   * the hang happened before we ever got a handle) may omit it and accept the wider scope.
    */
-  markUnhealthy(ownerUserId: string): void {
+  markUnhealthy(ownerUserId: string, expected?: TelegramService): void {
     const accountId = this.getActiveAccountId(ownerUserId);
     const key = accountId > 0 ? secondaryKey(ownerUserId, accountId) : ownerUserId;
-    if (!this.sessions.has(key)) return;
+    const pooled = this.sessions.get(key);
+    if (!pooled) return;
+    if (expected && pooled.telegram !== expected) {
+      console.log(`[sessions] Ignoring stale timeout for ${logUser(ownerUserId)} — pooled client was already replaced`);
+      return;
+    }
     this.discardPooled(key);
     console.log(
       `[sessions] Marked ${logUser(ownerUserId)} unhealthy after tool timeout — pooled client dropped, session string kept`,
@@ -400,7 +430,10 @@ export class SessionManager {
       } catch (error) {
         console.error(`[sessions] Telegram logOut failed for ${logUser(userId)}:`, error);
         try {
-          await session.telegram.disconnect();
+          // Bounded (review finding, issue #19): this runs inside the per-user lock, so an
+          // unbounded `disconnect()` on a half-open socket re-creates the very wedge this
+          // change removes — the logOut above is bounded, but its failure path was not.
+          await withDeadline("disconnect", config.telegramConnectTimeoutMs, () => session.telegram.disconnect());
         } catch (disconnectError) {
           // Best-effort cleanup after a failed logOut. We drop the session from
           // the pool either way, so this cannot be retried — but staying silent
@@ -465,7 +498,9 @@ export class SessionManager {
         } catch (err: unknown) {
           console.error(`[sessions] Old session logOut failed for ${logUser(userId)}:`, err);
           try {
-            await existing.telegram.disconnect();
+            // Bounded for the same reason as the logOut above: an unbounded teardown of a
+            // half-open socket never settles and leaks this task forever.
+            await withDeadline("disconnect", config.telegramConnectTimeoutMs, () => existing.telegram.disconnect());
           } catch (disconnectError) {
             console.error(`[sessions] disconnect of replaced session for ${logUser(userId)}:`, disconnectError);
           }
