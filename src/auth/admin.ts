@@ -75,18 +75,22 @@ export function buildAdminSessionCookie(): string {
  *  tests pass) for a still-valid, correctly-signed admin session. */
 export function isAdminSessionValid(cookieHeader: string | undefined): boolean {
   if (!cookieHeader) return false;
-  const match = cookieHeader.match(new RegExp(`${ADMIN_COOKIE_NAME}=([^;]+)`));
-  if (!match) return false;
-  const value = decodeURIComponent(match[1]);
-  const dot = value.lastIndexOf(".");
-  if (dot === -1) return false;
-  const payload = value.slice(0, dot);
-  const sig = value.slice(dot + 1);
-  const expected = createHmac("sha256", adminSigningKey()).update(payload).digest("hex");
-  const a = Buffer.from(sig);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
-  const expiresAt = Number(payload);
-  if (!Number.isFinite(expiresAt)) return false;
-  return expiresAt > Math.floor(Date.now() / 1000);
+  try {
+    const match = cookieHeader.match(new RegExp(`${ADMIN_COOKIE_NAME}=([^;]+)`));
+    if (!match) return false;
+    const value = decodeURIComponent(match[1]);
+    const dot = value.lastIndexOf(".");
+    if (dot === -1) return false;
+    const payload = value.slice(0, dot);
+    const sig = value.slice(dot + 1);
+    const expected = createHmac("sha256", adminSigningKey()).update(payload).digest("hex");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+    const expiresAt = Number(payload);
+    if (!Number.isFinite(expiresAt)) return false;
+    return expiresAt > Math.floor(Date.now() / 1000);
+  } catch {
+    return false;
+  }
 }

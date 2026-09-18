@@ -67,4 +67,10 @@ describe("admin session cookie", () => {
     const forged = `admin_session=1.0000000000000000000000000000000000000000000000000000000000000000`;
     assert.equal(isAdminSessionValid(forged), false);
   });
+
+  it("rejects a malformed percent-encoded cookie value instead of throwing", () => {
+    // decodeURIComponent throws URIError on malformed percent-encoding.
+    // Must fail closed: return false instead of throwing.
+    assert.equal(isAdminSessionValid("admin_session=%"), false);
+  });
 });
