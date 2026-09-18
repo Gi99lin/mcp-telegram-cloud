@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { buildAdminSessionCookie, isAdminSessionValid, verifyAdminPassword } from "../auth/admin.js";
 import { config } from "../config.js";
 import { AdminLoginPage } from "../pages/AdminLoginPage.js";
+import { adminLoginRateLimit } from "../rate-limit.js";
 
 /** Only ever redirect within this app — an attacker-controlled absolute
  *  returnTo would turn this into an open redirect off a login form. */
@@ -13,6 +14,8 @@ function safeReturnTo(raw: string | undefined): string {
 
 export function createAdminLoginRoutes(): Hono {
   const app = new Hono();
+
+  app.use("/*", adminLoginRateLimit);
 
   app.get("/", (c) => {
     const returnTo = safeReturnTo(c.req.query("returnTo"));

@@ -242,6 +242,12 @@ export const config = {
   reviewRateLimit: intOr(process.env.REVIEW_RATE_LIMIT, 10),
   reviewRateWindowMs: intOr(process.env.REVIEW_RATE_WINDOW_MS, 15 * 60_000),
 
+  /** /admin-login rate-limit: max attempts per window per IP. Strict — this is
+   * a human-typed password behind blocking scrypt verification, not a token.
+   * Default 10 per 15 min, matching reviewRateLimit's reasoning. 0 disables. */
+  adminLoginRateLimit: intOr(process.env.ADMIN_LOGIN_RATE_LIMIT, 10),
+  adminLoginRateWindowMs: intOr(process.env.ADMIN_LOGIN_RATE_WINDOW_MS, 15 * 60_000),
+
   /** Max request body bytes for JSON API routes (/oauth/*, /mcp). Default 1 MiB. */
   maxJsonBodyBytes: intOr(process.env.MAX_JSON_BODY_BYTES, 1024 * 1024),
 
