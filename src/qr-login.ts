@@ -359,13 +359,34 @@ export async function handleAddAccountQr(
         // It is already accessible without going through `telegram_accounts`,
         // and adding it as a secondary would double-bind the same identity
         // and silently steal active routing from the primary slot.
-        if (telegramUserId === ownerUserId) {
-          send("error_msg", {
-            message: `This is already your primary account (@${telegramUserId}). Scan a DIFFERENT Telegram account.`,
+        //
+        // `ownerUserId` is a fixed single-operator key (`admin:<username>`),
+        // not a Telegram handle/id — a different namespace entirely, so it
+        // can never equal `telegramUserId` (comparing against it, as this
+        // guard used to, can never fire). Compare against the primary
+        // account's actual, currently-connected Telegram identity instead:
+        // its stable numeric `id`, since `.username` can be absent or changed.
+        try {
+          const primaryTelegram = await sessions.getOrCreateSession(ownerUserId);
+          const primaryMe = await primaryTelegram.getMe();
+          if (primaryMe.id === me.id) {
+            send("error_msg", {
+              message: `This is already your primary account (@${telegramUserId}). Scan a DIFFERENT Telegram account.`,
+            });
+            // Best-effort: tear down the temp telegram so it doesn't linger.
+            telegram.disconnect().catch(() => {});
+            return;
+          }
+        } catch (err) {
+          // Primary session invalid / not yet connected — we can't verify
+          // identity. Don't let that block a legitimate add-account attempt:
+          // log and fall through to the normal add path rather than crashing
+          // or refusing the whole flow.
+          logger.warn(`Add-account guard: could not verify primary identity: ${(err as Error).message}`, {
+            component: "accounts",
+            event: "account.add.guard_check_failed",
+            userId: logUser(ownerUserId),
           });
-          // Best-effort: tear down the temp telegram so it doesn't linger.
-          telegram.disconnect().catch(() => {});
-          return;
         }
 
         const accountId = sessions.addAccount(ownerUserId, telegramUserId, outcome.sessionString, label);
