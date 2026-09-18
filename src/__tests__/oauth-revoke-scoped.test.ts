@@ -2,8 +2,7 @@ process.env.TELEGRAM_API_ID ??= "1";
 process.env.TELEGRAM_API_HASH ??= "test";
 process.env.ISSUER ??= "https://example.com";
 process.env.ADMIN_USERNAME ??= "alice";
-const { hashAdminPassword } = await import("../auth/admin.js");
-process.env.ADMIN_PASSWORD_HASH ??= hashAdminPassword("s3cret-pw");
+process.env.ADMIN_PASSWORD_HASH ??= "placeholder"; // this test never reads config.adminPasswordHash
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
