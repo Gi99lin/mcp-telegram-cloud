@@ -47,6 +47,14 @@ if (!config.logUserIds && config.logHashSalt === SENTINEL_LOG_HASH_SALT) {
   );
 }
 
+// Admin credentials are required for this single-operator deployment.
+if (!config.adminUsername || !config.adminPasswordHash) {
+  throw new Error(
+    "ADMIN_USERNAME and ADMIN_PASSWORD_HASH are required to boot this single-operator deployment. " +
+      "Generate the hash with: bun scripts/hash-admin-password.ts",
+  );
+}
+
 const sessions = new SessionManager();
 const oauth = new OAuthProvider({ issuer: config.issuer, db: sessions.getDb() });
 const usage = new UsageTracker(sessions.getDb());
