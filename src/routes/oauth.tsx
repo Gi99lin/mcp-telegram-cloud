@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { isAdminSessionValid } from "../auth/admin.js";
 import { config } from "../config.js";
 import { decideTgUserCookie } from "../cookie-handler.js";
 import { logger, logUser } from "../logger.js";
@@ -16,12 +17,6 @@ import { incr, OAUTH_FLOW } from "../telemetry/metrics.js";
 export interface OAuthRoutesDeps {
   oauth: OAuthProvider;
   sessions: SessionManager;
-}
-
-function getUserIdHint(c: Context): string | undefined {
-  const cookies = c.req.header("cookie") ?? "";
-  const match = cookies.match(/tg_user=([^;]+)/);
-  return match ? decodeURIComponent(match[1]) : undefined;
 }
 
 async function parseTokenParams(c: Context): Promise<Record<string, string>> {
@@ -163,32 +158,35 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
     }
 
-    // Fast path: if we have a cookie hint and session is valid, skip QR entirely (HTTP 302)
-    const userIdHint = getUserIdHint(c);
+    if (!isAdminSessionValid(c.req.header("cookie"))) {
+      const returnTo = `${c.req.path}?${new URL(c.req.url).search.slice(1)}`;
+      incr(OAUTH_FLOW, { step: "authorize", outcome: "admin_login_required" });
+      return c.redirect(`/admin-login?returnTo=${encodeURIComponent(returnTo)}`, 302);
+    }
 
-    if (userIdHint) {
-      const telegram = await sessions.tryReconnectSession(userIdHint);
-      if (telegram) {
-        const code = oauth.createAuthCode({
-          clientId,
-          userId: userIdHint,
-          redirectUri,
-          codeChallenge,
-          codeChallengeMethod,
-        });
-        const url = new URL(redirectUri);
-        url.searchParams.set("code", code);
-        if (state) url.searchParams.set("state", state);
+    // Admin is authenticated. Fast path: if the deployment's one Telegram
+    // account is already connected, skip the QR page entirely.
+    const telegram = await sessions.tryReconnectSession(config.ownerUserId);
+    if (telegram) {
+      const code = oauth.createAuthCode({
+        clientId,
+        userId: config.ownerUserId,
+        redirectUri,
+        codeChallenge,
+        codeChallengeMethod,
+      });
+      const url = new URL(redirectUri);
+      url.searchParams.set("code", code);
+      if (state) url.searchParams.set("state", state);
 
-        logger.info(`Fast OAuth redirect for ${logUser(userIdHint)} (302)`, {
-          component: "oauth",
-          event: "oauth.fast_redirect",
-          userId: logUser(userIdHint),
-        });
+      logger.info(`Fast OAuth redirect for ${logUser(config.ownerUserId)} (302)`, {
+        component: "oauth",
+        event: "oauth.fast_redirect",
+        userId: logUser(config.ownerUserId),
+      });
 
-        incr(OAUTH_FLOW, { step: "authorize", outcome: "fast_redirect" });
-        return c.redirect(url.toString(), 302);
-      }
+      incr(OAUTH_FLOW, { step: "authorize", outcome: "fast_redirect" });
+      return c.redirect(url.toString(), 302);
     }
 
     incr(OAUTH_FLOW, { step: "authorize", outcome: "qr_page" });
@@ -245,7 +243,10 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
     }
 
-    const userIdHint = getUserIdHint(c);
+    if (!isAdminSessionValid(c.req.header("cookie"))) {
+      return c.text("Forbidden", 403);
+    }
+    const userIdHint = config.ownerUserId;
 
     const stream = await handleOAuthQrLogin(
       sessions,

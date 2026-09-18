@@ -1,3 +1,4 @@
+import { config } from "./config.js";
 import { logger, logUser } from "./logger.js";
 import type { OAuthProvider } from "./oauth.js";
 import { type QrLoginHooks, runQrLogin } from "./qr-login-core.js";
@@ -233,7 +234,10 @@ export async function handleOAuthQrLogin(
         if (outcome.ok && outcome.sessionString) {
           const telegram = await connectFromSession(sessions, outcome.sessionString);
           const me = await telegram.getMe();
-          const userId = me.username ?? String(me.id);
+          // Single-operator fork: always save under the fixed owner id, never
+          // the self-reported Telegram identity (that was the multi-tenant
+          // model's whole trust boundary — removing it is the point).
+          const userId = config.ownerUserId;
 
           // Save Telegram session
           sessions.saveSessionString(userId, outcome.sessionString);
