@@ -75,8 +75,17 @@ export function buildAdminSessionCookie(): string {
  *  tests pass) for a still-valid, correctly-signed admin session. */
 export function isAdminSessionValid(cookieHeader: string | undefined): boolean {
   if (!cookieHeader) return false;
+  // Fail closed on an empty signing key. server.tsx already refuses to boot
+  // with an empty ADMIN_PASSWORD_HASH, but this function shouldn't rely on a
+  // non-local invariant enforced in a different file for its own core
+  // security property — an empty HMAC key makes every session cookie forgeable.
+  if (!config.adminPasswordHash) return false;
   try {
-    const match = cookieHeader.match(new RegExp(`${ADMIN_COOKIE_NAME}=([^;]+)`));
+    // Anchored to the start of the header or right after a `; ` separator, so
+    // this can't match `xadmin_session=...` (a different cookie whose name
+    // merely ends in the same substring) or a value elsewhere in the header
+    // that happens to contain the literal text `admin_session=`.
+    const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${ADMIN_COOKIE_NAME}=([^;]+)`));
     if (!match) return false;
     const value = decodeURIComponent(match[1]);
     const dot = value.lastIndexOf(".");
