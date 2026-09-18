@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { checkIntegrity, listUsers } from "../admin-inspect.js";
-import { isAdminAuthorized } from "../auth/admin.js";
+import { isAdminAuthorized, isAdminSessionValid } from "../auth/admin.js";
 import { config } from "../config.js";
 import { logger, logUser } from "../logger.js";
 import type { OAuthProvider } from "../oauth.js";
@@ -93,8 +93,16 @@ export function createAdminRoutes({ oauth, sessions, usage }: AdminRoutesDeps): 
   // ONLY place that tears down the actual Telegram session — /oauth/revoke
   // (routes/oauth.tsx) intentionally does not, so one OAuth client revoking
   // its token never logs out the others or the Telegram account itself.
+  //
+  // Also accepts a valid admin session cookie (not just the Bearer ADMIN_TOKEN):
+  // ADMIN_TOKEN is a separate, older, still-optional() credential from
+  // ADMIN_USERNAME/ADMIN_PASSWORD_HASH, and server.tsx's boot-time check only
+  // validates the latter two. Without this, a deployment that never set
+  // ADMIN_TOKEN would have no way to reach the one remaining path that can
+  // log out the Telegram session (Task 5 deliberately removed that from
+  // /oauth/revoke). Every other route in this file stays Bearer-only.
   app.post("/disconnect-telegram", async (c) => {
-    if (!isAdminAuthorized(c.req.header("Authorization"))) {
+    if (!isAdminAuthorized(c.req.header("Authorization")) && !isAdminSessionValid(c.req.header("cookie"))) {
       return c.json({ error: "unauthorized" }, 401);
     }
     // Warm up the session pool before destroying so that logOut() is actually

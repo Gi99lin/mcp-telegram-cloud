@@ -11,6 +11,7 @@ import { Hono } from "hono";
 
 const { createAdminRoutes } = await import("../routes/admin.js");
 const { config } = await import("../config.js");
+const { buildAdminSessionCookie } = await import("../auth/admin.js");
 
 function makeApp(overrides: {
   destroyUserSession?: (userId: string) => Promise<{ loggedOut: boolean }>;
@@ -61,5 +62,39 @@ describe("POST /api/disconnect-telegram", () => {
     assert.equal(revokedUserId, config.ownerUserId);
     const body = (await res.json()) as { ok: boolean; loggedOut: boolean; revokedTokens: number };
     assert.deepEqual(body, { ok: true, loggedOut: true, revokedTokens: 3 });
+  });
+
+  // Finding 2 (final-branch review, 2026-09-18-single-operator-auth): ADMIN_TOKEN
+  // is a separate, older, still-optional() credential from ADMIN_USERNAME/
+  // ADMIN_PASSWORD_HASH — server.tsx's boot check never validates it. A
+  // deployment that follows .env.example's admin section but leaves the
+  // pre-existing ADMIN_TOKEN blank would otherwise have NO way to reach this
+  // route. It must also accept a valid admin session cookie.
+  it("reaches the route via a valid admin session cookie, with no matching ADMIN_TOKEN presented", async () => {
+    let disconnectedUserId: string | undefined;
+    const app = makeApp({
+      destroyUserSession: async (userId) => {
+        disconnectedUserId = userId;
+        return { loggedOut: true };
+      },
+    });
+    const cookie = buildAdminSessionCookie().split(";")[0];
+    const res = await app.request("/api/disconnect-telegram", {
+      method: "POST",
+      // Deliberately wrong bearer token: proves the cookie path works on its
+      // own, not merely alongside a correct one.
+      headers: { Authorization: "Bearer not-the-real-token", cookie },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(disconnectedUserId, config.ownerUserId);
+  });
+
+  it("401s with an invalid bearer token and no cookie at all", async () => {
+    const app = makeApp({});
+    const res = await app.request("/api/disconnect-telegram", {
+      method: "POST",
+      headers: { Authorization: "Bearer not-the-real-token" },
+    });
+    assert.equal(res.status, 401);
   });
 });
