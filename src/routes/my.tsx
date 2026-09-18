@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { isAdminSessionValid } from "../auth/admin.js";
 import { config } from "../config.js";
 import type { DestructiveGuard } from "../destructive-guard.js";
 import { logger, logUser } from "../logger.js";
@@ -18,42 +19,28 @@ export interface MyRoutesDeps {
 }
 
 /**
- * Routes under `/my/*` are user-facing — authenticated by the `tg_user` cookie
- * set during the OAuth/QR flow (see cookie-handler.ts). The cookie value is the
- * Telegram username, which doubles as the userId in cloud's SQLite. We require
- * a matching saved session to confirm the user actually owns that account on
- * this server (cookie alone is not sufficient — same browser switching servers
- * would otherwise inherit a stale username).
+ * Routes under `/my/*` are user-facing — authenticated by the admin session
+ * cookie (see auth/admin.ts), same gate as /oauth/authorize. Single-operator
+ * fork: there is exactly one owner, so a valid admin session always maps to
+ * the fixed `config.ownerUserId` — no per-visitor identity to look up.
+ *
+ * This used to trust the `tg_user` cookie (the Telegram username reported
+ * back from QR login) cross-checked against saved session ids. That broke
+ * once /oauth/authorize started saving sessions under the fixed
+ * `config.ownerUserId` instead of the self-reported Telegram identity: the
+ * owner's own `tg_user` cookie no longer matched, and — worse — anyone who
+ * *guessed* the admin username (not a secret) could send a crafted
+ * `Cookie: tg_user=admin%3A<username>` header and get in, since
+ * `tg_user` was never HMAC-signed and reading it applied no charset check.
  */
 
-function getUsernameFromCookie(c: Context): string | undefined {
-  const cookies = c.req.header("cookie") ?? "";
-  // Anchor on start-of-string or `; ` so a cookie named `xtg_user` or one whose
-  // value happens to contain the literal substring `tg_user=victim` doesn't
-  // get picked up first. Defense in depth — typical browsers don't construct
-  // such headers, but adjacent cookie-injection paths shouldn't compromise auth.
-  const match = cookies.match(/(?:^|;\s*)tg_user=([^;]+)/);
-  if (!match) return undefined;
-  // decodeURIComponent throws URIError on malformed `%xx` sequences; treat that
-  // as missing-cookie so the route returns its normal unauthenticated branch
-  // (401/302) instead of leaking a 500.
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
-}
-
-function requireUser(c: Context, sessions: SessionManager): string | null {
-  const username = getUsernameFromCookie(c);
-  if (!username) return null;
-  const saved = sessions.getSavedUserIds();
-  if (!saved.includes(username)) return null;
-  return username;
+function requireUser(c: Context, _sessions: SessionManager): string | null {
+  if (!isAdminSessionValid(c.req.header("cookie"))) return null;
+  return config.ownerUserId;
 }
 
 function unauthorizedRedirect(c: Context): Response {
-  return c.redirect(`${config.issuer}/login`, 302);
+  return c.redirect("/admin-login", 302);
 }
 
 /** Exact-origin match for CSRF — never use startsWith on URLs (e.g.
