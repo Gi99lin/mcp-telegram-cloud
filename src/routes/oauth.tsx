@@ -325,7 +325,11 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     return c.json({ error: "unsupported_grant_type" }, 400);
   });
 
-  // RFC 7009 — Token Revocation
+  // RFC 7009 — Token Revocation. Scoped to exactly the token presented: this
+  // deployment has multiple OAuth clients (e.g. Claude.ai + ChatGPT) sharing
+  // one fixed owner id, so revoking must NOT cascade into every other
+  // client's tokens or tear down the shared Telegram session. Use the admin
+  // panel's explicit "Disconnect Telegram" action for that (routes/admin.tsx).
   app.post("/revoke", async (c) => {
     const params = await parseTokenParams(c);
     const token = params.token;
@@ -342,17 +346,9 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     const userId = oauth.revokeToken(token);
 
     if (userId) {
-      const uid = logUser(userId);
-      logger.info(`Destroying Telegram session for ${uid}`, {
+      logger.info(`Token revoked for ${logUser(userId)}`, {
         component: "oauth",
-        userId: uid,
-        event: "oauth.revoke.cleanup",
-      });
-      const { loggedOut } = await sessions.destroyUserSession(userId);
-      oauth.revokeAllUserTokens(userId);
-      logger.info(`Full cleanup done for ${uid} (loggedOut=${loggedOut})`, {
-        component: "oauth",
-        userId: uid,
+        userId: logUser(userId),
         event: "oauth.revoke.done",
       });
       incr(OAUTH_FLOW, { step: "revoke", outcome: "ok" });
