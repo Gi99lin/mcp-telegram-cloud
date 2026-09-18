@@ -89,6 +89,24 @@ export function createAdminRoutes({ oauth, sessions, usage }: AdminRoutesDeps): 
     return c.json({ ok: true, userId, loggedOut, revokedTokens });
   });
 
+  // Explicit, admin-only Telegram logout for the shared owner id. This is the
+  // ONLY place that tears down the actual Telegram session — /oauth/revoke
+  // (routes/oauth.tsx) intentionally does not, so one OAuth client revoking
+  // its token never logs out the others or the Telegram account itself.
+  app.post("/disconnect-telegram", async (c) => {
+    if (!isAdminAuthorized(c.req.header("Authorization"))) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    const { loggedOut } = await sessions.destroyUserSession(config.ownerUserId);
+    const revokedTokens = oauth.revokeAllUserTokens(config.ownerUserId);
+    logger.warn("Admin-initiated Telegram disconnect", {
+      component: "admin",
+      event: "admin.telegram.disconnect",
+      userId: logUser(config.ownerUserId),
+    });
+    return c.json({ ok: true, loggedOut, revokedTokens });
+  });
+
   app.get("/observability", async (c) => {
     if (!isAdminAuthorized(c.req.header("Authorization"))) {
       return c.json({ error: "unauthorized" }, 401);
