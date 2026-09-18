@@ -1,18 +1,20 @@
 import { Hono } from "hono";
 import { buildAdminSessionCookie, isAdminSessionValid, verifyAdminPassword } from "../auth/admin.js";
+import { config } from "../config.js";
 import { AdminLoginPage } from "../pages/AdminLoginPage.js";
 
 /** Only ever redirect within this app — an attacker-controlled absolute
  *  returnTo would turn this into an open redirect off a login form. */
 function safeReturnTo(raw: string | undefined): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
+  if (!raw || !raw.startsWith("/")) return "/";
+  if (raw.length > 1 && (raw[1] === "/" || raw[1] === "\\")) return "/";
   return raw;
 }
 
 export function createAdminLoginRoutes(): Hono {
   const app = new Hono();
 
-  app.get("/", async (c) => {
+  app.get("/", (c) => {
     const returnTo = safeReturnTo(c.req.query("returnTo"));
     if (isAdminSessionValid(c.req.header("cookie"))) {
       return c.redirect(returnTo, 302);
@@ -21,15 +23,12 @@ export function createAdminLoginRoutes(): Hono {
   });
 
   app.post("/", async (c) => {
-    const { config } = await import("../config.js");
     const returnTo = safeReturnTo(c.req.query("returnTo"));
     const body = await c.req.parseBody();
     const username = typeof body.username === "string" ? body.username : "";
     const password = typeof body.password === "string" ? body.password : "";
 
-    // Read password hash directly from environment to handle test setup ordering.
-    const adminPasswordHash = process.env.ADMIN_PASSWORD_HASH || config.adminPasswordHash;
-    const ok = username === config.adminUsername && verifyAdminPassword(password, adminPasswordHash);
+    const ok = username === config.adminUsername && verifyAdminPassword(password, config.adminPasswordHash);
     if (!ok) {
       return c.redirect(`/admin-login?returnTo=${encodeURIComponent(returnTo)}&error=1`, 302);
     }
