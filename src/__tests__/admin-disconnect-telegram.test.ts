@@ -15,9 +15,11 @@ const { config } = await import("../config.js");
 function makeApp(overrides: {
   destroyUserSession?: (userId: string) => Promise<{ loggedOut: boolean }>;
   revokeAllUserTokens?: (userId: string) => number;
+  getOrCreateSession?: (userId: string) => Promise<void>;
 }) {
   const sessions = {
     destroyUserSession: overrides.destroyUserSession ?? (async () => ({ loggedOut: true })),
+    getOrCreateSession: overrides.getOrCreateSession ?? (async () => {}),
     getDb: () => ({ prepare: () => ({ get: () => undefined, all: () => [] }) }),
   } as unknown as Parameters<typeof createAdminRoutes>[0]["sessions"];
   const oauth = {

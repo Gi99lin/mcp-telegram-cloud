@@ -97,6 +97,15 @@ export function createAdminRoutes({ oauth, sessions, usage }: AdminRoutesDeps): 
     if (!isAdminAuthorized(c.req.header("Authorization"))) {
       return c.json({ error: "unauthorized" }, 401);
     }
+    // Warm up the session pool before destroying so that logOut() is actually
+    // called on the Telegram side; without this, if the pool doesn't have the
+    // session (e.g. after restart), destroyUserSession just deletes the local
+    // row and returns loggedOut=false without revoking the auth key upstream.
+    try {
+      await sessions.getOrCreateSession(config.ownerUserId);
+    } catch {
+      // Session string broken/expired on Telegram's side — nothing to log out of.
+    }
     const { loggedOut } = await sessions.destroyUserSession(config.ownerUserId);
     const revokedTokens = oauth.revokeAllUserTokens(config.ownerUserId);
     logger.warn("Admin-initiated Telegram disconnect", {
