@@ -362,21 +362,43 @@ export async function handleAddAccountQr(
         // and adding it as a secondary would double-bind the same identity
         // and silently steal active routing from the primary slot.
         //
-        // `ownerUserId` is a fixed single-operator key (`admin:<username>`),
-        // not a Telegram handle/id — a different namespace entirely, so it
-        // can never equal `telegramUserId` (comparing against it, as this
-        // guard used to, can never fire). Compare against the primary
-        // account's actual, currently-connected Telegram identity instead:
-        // its stable numeric `id`, since `.username` can be absent or changed.
+        // Two checks, because `ownerUserId` lives in different namespaces
+        // depending on mode:
+        //  - Multi-tenant (flag off): `ownerUserId` IS a Telegram handle
+        //    (same namespace as `telegramUserId`), so the plain string
+        //    compare below is upstream's original, still-correct guard and
+        //    is the one that actually fires in this mode.
+        //  - Single-operator mode (flag on): `ownerUserId` is a fixed key
+        //    (`admin:<username>`) from a different namespace entirely, so it
+        //    can never equal `telegramUserId` — the string compare can't
+        //    fire here. Compare against the primary account's actual,
+        //    currently-connected Telegram identity instead: its stable
+        //    numeric `id`, since `.username` can be absent or changed.
+        //
+        // The id-based check requires reconnecting the primary session and
+        // fails open (logs a warning, allows the add) if that can't be
+        // verified — e.g. the primary session is transiently unreachable.
+        // The string compare above runs unconditionally and doesn't depend
+        // on the primary being reachable, so it substantially narrows the
+        // practical impact of that fail-open path in multi-tenant mode.
+        const refuseDuplicatePrimary = () => {
+          send("error_msg", {
+            message: `This is already your primary account (@${telegramUserId}). Scan a DIFFERENT Telegram account.`,
+          });
+          // Best-effort: tear down the temp telegram so it doesn't linger.
+          telegram.disconnect().catch(() => {});
+        };
+
+        if (telegramUserId === ownerUserId) {
+          refuseDuplicatePrimary();
+          return;
+        }
+
         try {
           const primaryTelegram = await sessions.getOrCreateSession(ownerUserId);
           const primaryMe = await primaryTelegram.getMe();
           if (primaryMe.id === me.id) {
-            send("error_msg", {
-              message: `This is already your primary account (@${telegramUserId}). Scan a DIFFERENT Telegram account.`,
-            });
-            // Best-effort: tear down the temp telegram so it doesn't linger.
-            telegram.disconnect().catch(() => {});
+            refuseDuplicatePrimary();
             return;
           }
         } catch (err) {

@@ -1,14 +1,25 @@
 /**
- * Finding 3 (final-branch review, 2026-09-18-single-operator-auth):
+ * Finding 3 (final-branch review, 2026-09-18-single-operator-auth) and
+ * finding 2 (final-branch review, 2026-09-19-optional-single-operator-mode):
  * `handleAddAccountQr`'s "don't double-bind the primary account" guard in
  * qr-login.ts used to compare the scanned account's Telegram handle/id
- * against `ownerUserId` — a fixed `admin:<username>` key from a completely
- * different namespace, so the comparison could never fire (dead code).
+ * against `ownerUserId` — reasoned (incorrectly, as it turns out) to be a
+ * fixed `admin:<username>` key from a completely different namespace, so
+ * the comparison could never fire (dead code).
  *
- * The fix compares the scanned account's real Telegram `id` against the
- * PRIMARY account's live Telegram `id` (fetched via
- * `sessions.getOrCreateSession(ownerUserId).getMe()`), and fails open (logs
- * a warning, allows the add) if that lookup can't complete.
+ * That reasoning only holds in single-operator mode. In multi-tenant mode
+ * (the default, flag off), `ownerUserId` IS a Telegram handle — same
+ * namespace as `telegramUserId` — so the ORIGINAL plain string compare is
+ * still correct and still needed there. The current guard keeps BOTH
+ * checks:
+ *  - the string compare (`telegramUserId === ownerUserId`), which fires in
+ *    multi-tenant mode and runs unconditionally, with no dependency on the
+ *    primary session being reachable;
+ *  - the id-based compare, which fires in single-operator mode by comparing
+ *    the scanned account's real Telegram `id` against the PRIMARY account's
+ *    live Telegram `id` (fetched via
+ *    `sessions.getOrCreateSession(ownerUserId).getMe()`), and fails open
+ *    (logs a warning, allows the add) if that lookup can't complete.
  *
  * `runQrLogin` (qr-login-core.ts) is mocked out via `mock.module` — it talks
  * to live GramJS and isn't worth a full network-shaped fake for this guard's
@@ -132,6 +143,28 @@ async function collectEvents(stream: ReadableStream<Uint8Array>): Promise<Array<
 const OWNER = "admin:alice";
 
 describe("handleAddAccountQr — primary double-bind guard", () => {
+  it("refuses the add via the plain string compare when telegramUserId === ownerUserId (multi-tenant mode) — even when the primary session can't be verified", async () => {
+    identities.clear();
+    identities.set("scanned-same-handle", { id: "777", username: "alice_tg" });
+    mockOutcome = { ok: true, sessionString: "scanned-same-handle" };
+
+    const sm = makeManager();
+    // Deliberately NOT saving a primary session for OWNER_HANDLE. If the
+    // string-compare check didn't fire first, the id-based fallback would
+    // throw (getOrCreateSession has nothing to reconnect) and fail OPEN,
+    // allowing the add through. The string compare must catch this before
+    // that fallback is ever reached.
+    const OWNER_HANDLE = "alice_tg"; // multi-tenant mode: ownerUserId IS the Telegram handle
+
+    const events = await collectEvents(await handleAddAccountQr(sm, OWNER_HANDLE, null, new AbortController().signal));
+
+    const error = events.find((e) => e.event === "error_msg") as { data: { message: string } } | undefined;
+    expect(error).toBeDefined();
+    expect(error?.data.message).toMatch(/already your primary account/);
+    expect(events.some((e) => e.event === "added")).toBe(false);
+    expect(sm.listAccounts(OWNER_HANDLE).filter((a) => !a.isPrimary)).toEqual([]);
+  });
+
   it("refuses the add when the scanned account's Telegram id matches the primary's", async () => {
     identities.clear();
     identities.set("primary-session-str", { id: "555", username: "alice_tg" });
