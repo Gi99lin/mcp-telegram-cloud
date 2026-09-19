@@ -369,10 +369,22 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
   });
 
   // RFC 7009 — Token Revocation. Scoped to exactly the token presented: this
-  // deployment has multiple OAuth clients (e.g. Claude.ai + ChatGPT) sharing
-  // one fixed owner id, so revoking must NOT cascade into every other
-  // client's tokens or tear down the shared Telegram session. Use the admin
-  // panel's explicit "Disconnect Telegram" action for that (routes/admin.tsx).
+  // deployment can have multiple OAuth clients (e.g. Claude.ai + ChatGPT)
+  // sharing one identity, so revoking must NOT cascade into every other
+  // client's tokens — that cascade is a bug in BOTH modes and stays fixed
+  // unconditionally below.
+  //
+  // Whether it ALSO tears down the Telegram session depends on the mode:
+  //  - Multi-tenant (default, flag off): one Telegram identity IS one user
+  //    (no sharing across OAuth clients the way `config.ownerUserId` is
+  //    shared in single-operator mode), so this token revoke is that user's
+  //    only self-service disconnect — `/my/*` has no disconnect route, and
+  //    `/api/disconnect-telegram` is admin-only and hardwired to
+  //    `config.ownerUserId`. Matches upstream's original behavior.
+  //  - Single-operator mode (flag on): multiple OAuth clients share one
+  //    fixed owner id, so a full teardown here would log out every other
+  //    client too. Skip it — use the admin panel's explicit "Disconnect
+  //    Telegram" action instead (routes/admin.tsx).
   app.post("/revoke", async (c) => {
     const params = await parseTokenParams(c);
     const token = params.token;
@@ -389,6 +401,14 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
     const userId = oauth.revokeToken(token);
 
     if (userId) {
+      if (!config.singleOperatorMode) {
+        await sessions.destroyUserSession(userId);
+        logger.info(`Telegram session destroyed for ${logUser(userId)}`, {
+          component: "oauth",
+          userId: logUser(userId),
+          event: "oauth.revoke.telegram_logout",
+        });
+      }
       logger.info(`Token revoked for ${logUser(userId)}`, {
         component: "oauth",
         userId: logUser(userId),
