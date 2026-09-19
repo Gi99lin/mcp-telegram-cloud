@@ -279,3 +279,16 @@ so affected users have somewhere to reach you.
 Security issues: see [`SECURITY.md`](../SECURITY.md).
 
 Everything else: GitHub issues on this repo.
+
+## Single-operator fork note
+
+This fork replaces the public multi-tenant OAuth identity check (anyone
+scans their own Telegram QR to register) with an admin login gate —
+see `docs/superpowers/specs/2026-09-18-single-operator-auth-design.md`
+for the full design. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD_HASH`
+(generate via `bun scripts/hash-admin-password.ts`) before first boot.
+
+Note: this codebase, as of this fork, mounts no public landing/privacy/terms
+pages (`src/server.tsx` is explicitly "functional-only" — OAuth/login/my/mcp).
+The upstream self-hosting guidance about reviewing/deleting those pages does
+not apply here; there is nothing to gate.

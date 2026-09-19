@@ -64,6 +64,12 @@ export const parseTelemetryMode = (raw: string | undefined): TelemetryMode => {
   return "local-only";
 };
 
+/** Fixed identity for this single-operator deployment — replaces the
+ * QR-derived per-Telegram-identity owner id used by the upstream
+ * multi-tenant flow. Exported for unit tests; not for runtime use outside
+ * config.ts. */
+export const ownerUserIdFor = (username: string): string => `admin:${username}`;
+
 /**
  * ISSUER is the most load-bearing URL in the process: OAuth issuer, base for
  * every absolute link, the `resource` identifier advertised to MCP clients, and
@@ -145,6 +151,16 @@ export const config = {
   openaiAppsChallenge: optional(process.env.OPENAI_APPS_CHALLENGE, ""),
   adminToken: process.env.ADMIN_TOKEN ?? "",
 
+  /** Username for the /admin-login gate in front of /oauth/authorize.
+   * Required — this fork has no multi-tenant fallback. */
+  adminUsername: optional(process.env.ADMIN_USERNAME, ""),
+  /** scrypt hash of the admin password, format `s1:<salt_hex>:<hash_hex>`.
+   * Generate with `bun scripts/hash-admin-password.ts`. */
+  adminPasswordHash: optional(process.env.ADMIN_PASSWORD_HASH, ""),
+  /** Fixed owner id for this deployment's single Telegram identity — used
+   * everywhere `user_sessions.user_id` / `owner_user_id` is looked up. */
+  ownerUserId: ownerUserIdFor(optional(process.env.ADMIN_USERNAME, "")),
+
   /** 32-byte key (64 hex or 44-char base64) that encrypts `session_string` at rest in
    * cloud.db. Injected from a GitHub Secret at deploy time → held only in RAM, never on
    * disk, so a stolen volume/backup yields ciphertext without the key. Empty = PASSTHROUGH
@@ -225,6 +241,12 @@ export const config = {
    * Default 10 per 15 min per IP — makes brute-force implausible even if entropy drops. */
   reviewRateLimit: intOr(process.env.REVIEW_RATE_LIMIT, 10),
   reviewRateWindowMs: intOr(process.env.REVIEW_RATE_WINDOW_MS, 15 * 60_000),
+
+  /** /admin-login rate-limit: max attempts per window per IP. Strict — this is
+   * a human-typed password behind blocking scrypt verification, not a token.
+   * Default 10 per 15 min, matching reviewRateLimit's reasoning. 0 disables. */
+  adminLoginRateLimit: intOr(process.env.ADMIN_LOGIN_RATE_LIMIT, 10),
+  adminLoginRateWindowMs: intOr(process.env.ADMIN_LOGIN_RATE_WINDOW_MS, 15 * 60_000),
 
   /** Max request body bytes for JSON API routes (/oauth/*, /mcp). Default 1 MiB. */
   maxJsonBodyBytes: intOr(process.env.MAX_JSON_BODY_BYTES, 1024 * 1024),

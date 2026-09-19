@@ -15,12 +15,12 @@ import { OAuthProvider } from "./oauth.js";
 import { installRateLimiterEventListener } from "./rate-limiter-events.js";
 import { createAccountsRoutes } from "./routes/accounts.js";
 import { createAdminRoutes } from "./routes/admin.js";
+import { createAdminLoginRoutes } from "./routes/admin-login.js";
 import { createLoginRoutes } from "./routes/login.js";
 import { registerMcpRoutes } from "./routes/mcp.js";
 import { createMyRoutes } from "./routes/my.js";
 import { createOAuthRoutes, createOAuthWellKnownRoutes } from "./routes/oauth.js";
 import { createQrPasswordRoutes } from "./routes/qr-password.js";
-import { createReviewRoutes } from "./routes/review.js";
 import { createStaticRoutes } from "./routes/static.js";
 import { SessionManager } from "./session-manager.js";
 import { flushMetrics, registerGauge, startMetricsFlush, stopMetricsFlush } from "./telemetry/metrics.js";
@@ -44,6 +44,14 @@ if (!config.logUserIds && config.logHashSalt === SENTINEL_LOG_HASH_SALT) {
       component: "config",
       event: "log_hash_salt.sentinel",
     },
+  );
+}
+
+// Admin credentials are required for this single-operator deployment.
+if (!config.adminUsername || !config.adminPasswordHash) {
+  throw new Error(
+    "ADMIN_USERNAME and ADMIN_PASSWORD_HASH are required to boot this single-operator deployment. " +
+      "Generate the hash with: bun scripts/hash-admin-password.ts",
   );
 }
 
@@ -251,12 +259,15 @@ app.route("/", createOAuthWellKnownRoutes(oauth));
 app.route("/oauth", createOAuthRoutes({ oauth, sessions }));
 app.route("/api", createAdminRoutes({ oauth, sessions, usage }));
 registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads });
+app.route("/admin-login", createAdminLoginRoutes());
 app.route("/login", createLoginRoutes({ sessions }));
 app.route("/my", createMyRoutes({ destructive, sessions, uploads }));
 app.route("/accounts", createAccountsRoutes({ sessions }));
-// Directory-review access: hands a reviewer the demo session so the OAuth fast
-// path can skip the QR code they have no way to scan.
-app.route("/review", createReviewRoutes({ sessions }));
+// Directory-review access (routes/review.tsx) is deliberately unmounted in this
+// single-operator fork: it exists to let a public-directory reviewer bypass QR
+// login for a demo Telegram account, a scenario that doesn't apply here. The
+// route module itself is kept for parity with upstream and is still exercised
+// directly by src/__tests__/review-access.test.ts.
 // Shared 2FA cloud-password back-channel for all QR flows (POST /qr/password).
 app.route("/qr", createQrPasswordRoutes());
 
