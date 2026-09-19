@@ -2,6 +2,7 @@ process.env.TELEGRAM_API_ID ??= "1";
 process.env.TELEGRAM_API_HASH ??= "test";
 process.env.ISSUER ??= "https://example.com";
 process.env.ADMIN_USERNAME ??= "alice";
+process.env.SINGLE_OPERATOR_MODE ??= "true";
 // Same fixed literal as oauth-authorize-admin-gate.test.ts (Task 3's convention) —
 // must be set BEFORE any import. Importing `../auth/admin.js` (which transitively
 // imports `config.js`) first would freeze `config.adminPasswordHash` at "" for the

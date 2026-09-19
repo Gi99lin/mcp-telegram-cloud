@@ -19,28 +19,43 @@ export interface MyRoutesDeps {
 }
 
 /**
- * Routes under `/my/*` are user-facing — authenticated by the admin session
- * cookie (see auth/admin.ts), same gate as /oauth/authorize. Single-operator
- * fork: there is exactly one owner, so a valid admin session always maps to
- * the fixed `config.ownerUserId` — no per-visitor identity to look up.
+ * Routes under `/my/*` are user-facing, authenticated one of two ways
+ * depending on `config.singleOperatorMode`:
  *
- * This used to trust the `tg_user` cookie (the Telegram username reported
- * back from QR login) cross-checked against saved session ids. That broke
- * once /oauth/authorize started saving sessions under the fixed
- * `config.ownerUserId` instead of the self-reported Telegram identity: the
- * owner's own `tg_user` cookie no longer matched, and — worse — anyone who
- * *guessed* the admin username (not a secret) could send a crafted
- * `Cookie: tg_user=admin%3A<username>` header and get in, since
- * `tg_user` was never HMAC-signed and reading it applied no charset check.
+ * - Single-operator mode: the admin session cookie (see auth/admin.ts), same
+ *   gate as /oauth/authorize. There is exactly one owner, so a valid admin
+ *   session always maps to the fixed `config.ownerUserId`.
+ * - Multi-tenant (default): upstream's original mechanism — the `tg_user`
+ *   cookie (the Telegram username reported back from QR login), cross-checked
+ *   against saved session ids so a stale/foreign cookie value can't
+ *   impersonate a real user.
  */
 
-function requireUser(c: Context, _sessions: SessionManager): string | null {
-  if (!isAdminSessionValid(c.req.header("cookie"))) return null;
-  return config.ownerUserId;
+function getUsernameFromCookie(c: Context): string | undefined {
+  const cookies = c.req.header("cookie") ?? "";
+  const match = cookies.match(/(?:^|;\s*)tg_user=([^;]+)/);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function requireUser(c: Context, sessions: SessionManager): string | null {
+  if (config.singleOperatorMode) {
+    if (!isAdminSessionValid(c.req.header("cookie"))) return null;
+    return config.ownerUserId;
+  }
+  const username = getUsernameFromCookie(c);
+  if (!username) return null;
+  const saved = sessions.getSavedUserIds();
+  if (!saved.includes(username)) return null;
+  return username;
 }
 
 function unauthorizedRedirect(c: Context): Response {
-  return c.redirect("/admin-login", 302);
+  return c.redirect(config.singleOperatorMode ? "/admin-login" : `${config.issuer}/login`, 302);
 }
 
 /** Exact-origin match for CSRF — never use startsWith on URLs (e.g.
