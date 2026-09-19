@@ -14,7 +14,7 @@ export function createLoginRoutes({ sessions }: LoginRoutesDeps): Hono {
   const app = new Hono();
 
   app.get("/", async (c) => {
-    if (!isAdminSessionValid(c.req.header("cookie"))) {
+    if (config.singleOperatorMode && !isAdminSessionValid(c.req.header("cookie"))) {
       return c.redirect("/admin-login", 302);
     }
 
@@ -30,19 +30,28 @@ export function createLoginRoutes({ sessions }: LoginRoutesDeps): Hono {
   });
 
   app.get("/qr", async (c) => {
-    if (!isAdminSessionValid(c.req.header("cookie"))) {
-      return c.text("Forbidden", 403);
+    let userId: string;
+    if (config.singleOperatorMode) {
+      if (!isAdminSessionValid(c.req.header("cookie"))) {
+        return c.text("Forbidden", 403);
+      }
+      // Single-operator mode: never trust the caller-supplied `userId` query
+      // param as the session key — see the fixed docs/superpowers spec for
+      // the hijack this closes. The param may still arrive from the
+      // client-side qr-flow island (it has its own userId input for the
+      // multi-tenant flow) but is ignored here.
+      userId = config.ownerUserId;
+    } else {
+      // Multi-tenant (default): upstream's original self-service flow — the
+      // visitor picks which Telegram identity to log into.
+      const queryUserId = c.req.query("userId");
+      if (!queryUserId) {
+        return c.text("userId required", 400);
+      }
+      userId = queryUserId;
     }
 
-    // Single-operator fork: never trust the caller-supplied `userId` query
-    // param as the session key. Before this gate, an attacker who merely knew
-    // the (non-secret) admin username could hit this endpoint with
-    // `userId=admin:<username>` — now config.ownerUserId, a fixed, guessable
-    // string — scan the QR with their OWN Telegram account, and hijack the
-    // deployment's one primary session. The query param may still arrive from
-    // the client-side qr-flow island (it has its own userId input for the
-    // legacy multi-tenant flow) but is ignored here.
-    const stream = await handleQrLogin(sessions, config.ownerUserId, c.req.raw.signal);
+    const stream = await handleQrLogin(sessions, userId, c.req.raw.signal);
 
     return new Response(stream, {
       headers: {
