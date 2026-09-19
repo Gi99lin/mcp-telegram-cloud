@@ -28,6 +28,12 @@ async function parseTokenParams(c: Context): Promise<Record<string, string>> {
   return c.req.json();
 }
 
+function getUserIdHint(c: Context): string | undefined {
+  const cookies = c.req.header("cookie") ?? "";
+  const match = cookies.match(/tg_user=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : undefined;
+}
+
 /**
  * RFC 9728 protected-resource metadata document.
  *
@@ -158,35 +164,67 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
     }
 
-    if (!isAdminSessionValid(c.req.header("cookie"))) {
-      const returnTo = `${c.req.path}?${new URL(c.req.url).search.slice(1)}`;
-      incr(OAUTH_FLOW, { step: "authorize", outcome: "admin_login_required" });
-      return c.redirect(`/admin-login?returnTo=${encodeURIComponent(returnTo)}`, 302);
-    }
+    if (config.singleOperatorMode) {
+      if (!isAdminSessionValid(c.req.header("cookie"))) {
+        const returnTo = `${c.req.path}?${new URL(c.req.url).search.slice(1)}`;
+        incr(OAUTH_FLOW, { step: "authorize", outcome: "admin_login_required" });
+        return c.redirect(`/admin-login?returnTo=${encodeURIComponent(returnTo)}`, 302);
+      }
 
-    // Admin is authenticated. Fast path: if the deployment's one Telegram
-    // account is already connected, skip the QR page entirely.
-    const telegram = await sessions.tryReconnectSession(config.ownerUserId);
-    if (telegram) {
-      const code = oauth.createAuthCode({
-        clientId,
-        userId: config.ownerUserId,
-        redirectUri,
-        codeChallenge,
-        codeChallengeMethod,
-      });
-      const url = new URL(redirectUri);
-      url.searchParams.set("code", code);
-      if (state) url.searchParams.set("state", state);
+      // Admin is authenticated. Fast path: if the deployment's one Telegram
+      // account is already connected, skip the QR page entirely.
+      const telegram = await sessions.tryReconnectSession(config.ownerUserId);
+      if (telegram) {
+        const code = oauth.createAuthCode({
+          clientId,
+          userId: config.ownerUserId,
+          redirectUri,
+          codeChallenge,
+          codeChallengeMethod,
+        });
+        const url = new URL(redirectUri);
+        url.searchParams.set("code", code);
+        if (state) url.searchParams.set("state", state);
 
-      logger.info(`Fast OAuth redirect for ${logUser(config.ownerUserId)} (302)`, {
-        component: "oauth",
-        event: "oauth.fast_redirect",
-        userId: logUser(config.ownerUserId),
-      });
+        logger.info(`Fast OAuth redirect for ${logUser(config.ownerUserId)} (302)`, {
+          component: "oauth",
+          event: "oauth.fast_redirect",
+          userId: logUser(config.ownerUserId),
+        });
 
-      incr(OAUTH_FLOW, { step: "authorize", outcome: "fast_redirect" });
-      return c.redirect(url.toString(), 302);
+        incr(OAUTH_FLOW, { step: "authorize", outcome: "fast_redirect" });
+        return c.redirect(url.toString(), 302);
+      }
+    } else {
+      // Upstream's original multi-tenant fast path: an optional per-visitor
+      // hint cookie (set after a prior QR login) lets a returning visitor skip
+      // the QR page if their session is still valid. No admin gate — anyone
+      // can reach this far, exactly like upstream.
+      const userIdHint = getUserIdHint(c);
+      if (userIdHint) {
+        const telegram = await sessions.tryReconnectSession(userIdHint);
+        if (telegram) {
+          const code = oauth.createAuthCode({
+            clientId,
+            userId: userIdHint,
+            redirectUri,
+            codeChallenge,
+            codeChallengeMethod,
+          });
+          const url = new URL(redirectUri);
+          url.searchParams.set("code", code);
+          if (state) url.searchParams.set("state", state);
+
+          logger.info(`Fast OAuth redirect for ${logUser(userIdHint)} (302)`, {
+            component: "oauth",
+            event: "oauth.fast_redirect",
+            userId: logUser(userIdHint),
+          });
+
+          incr(OAUTH_FLOW, { step: "authorize", outcome: "fast_redirect" });
+          return c.redirect(url.toString(), 302);
+        }
+      }
     }
 
     incr(OAUTH_FLOW, { step: "authorize", outcome: "qr_page" });
@@ -243,10 +281,15 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
     }
 
-    if (!isAdminSessionValid(c.req.header("cookie"))) {
-      return c.text("Forbidden", 403);
+    let userIdHint: string | undefined;
+    if (config.singleOperatorMode) {
+      if (!isAdminSessionValid(c.req.header("cookie"))) {
+        return c.text("Forbidden", 403);
+      }
+      userIdHint = config.ownerUserId;
+    } else {
+      userIdHint = getUserIdHint(c);
     }
-    const userIdHint = config.ownerUserId;
 
     const stream = await handleOAuthQrLogin(
       sessions,
