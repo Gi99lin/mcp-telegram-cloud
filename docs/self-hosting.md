@@ -280,15 +280,16 @@ Security issues: see [`SECURITY.md`](../SECURITY.md).
 
 Everything else: GitHub issues on this repo.
 
-## Single-operator fork note
+## Single-operator mode (optional)
 
-This fork replaces the public multi-tenant OAuth identity check (anyone
-scans their own Telegram QR to register) with an admin login gate —
-see `docs/superpowers/specs/2026-09-18-single-operator-auth-design.md`
-for the full design. Set `ADMIN_USERNAME` and `ADMIN_PASSWORD_HASH`
-(generate via `bun scripts/hash-admin-password.ts`) before first boot.
+Set `SINGLE_OPERATOR_MODE=true` (plus `ADMIN_USERNAME` and `ADMIN_PASSWORD_HASH`,
+generated via `bun scripts/hash-admin-password.ts`) to replace the public
+multi-tenant OAuth identity check (anyone scans their own Telegram QR to
+register) with an admin login gate — see
+`docs/superpowers/specs/2026-09-18-single-operator-auth-design.md` for the
+full design. Leave it unset (or `false`) to run exactly like upstream's
+public multi-tenant service.
 
-Note: this codebase, as of this fork, mounts no public landing/privacy/terms
-pages (`src/server.tsx` is explicitly "functional-only" — OAuth/login/my/mcp).
-The upstream self-hosting guidance about reviewing/deleting those pages does
-not apply here; there is nothing to gate.
+### Flipping the mode off after running with it on
+
+If this deployment ever ran with `SINGLE_OPERATOR_MODE=true`, the Telegram session is saved under the predictable id `admin:<ADMIN_USERNAME>`. Turning the flag back off without clearing that row (from `user_sessions`, `telegram_accounts`, or `active_account` — see `SessionManager`'s `destroyUserSession` method) leaves that identity reachable through the now-ungated multi-tenant routes. Either keep the flag on permanently once enabled, or clear the row before flipping it off.
