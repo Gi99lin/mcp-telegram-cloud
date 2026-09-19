@@ -21,6 +21,7 @@ import { registerMcpRoutes } from "./routes/mcp.js";
 import { createMyRoutes } from "./routes/my.js";
 import { createOAuthRoutes, createOAuthWellKnownRoutes } from "./routes/oauth.js";
 import { createQrPasswordRoutes } from "./routes/qr-password.js";
+import { createReviewRoutes } from "./routes/review.js";
 import { createStaticRoutes } from "./routes/static.js";
 import { SessionManager } from "./session-manager.js";
 import { flushMetrics, registerGauge, startMetricsFlush, stopMetricsFlush } from "./telemetry/metrics.js";
@@ -265,11 +266,13 @@ app.route("/admin-login", createAdminLoginRoutes());
 app.route("/login", createLoginRoutes({ sessions }));
 app.route("/my", createMyRoutes({ destructive, sessions, uploads }));
 app.route("/accounts", createAccountsRoutes({ sessions }));
-// Directory-review access (routes/review.tsx) is deliberately unmounted in this
-// single-operator fork: it exists to let a public-directory reviewer bypass QR
-// login for a demo Telegram account, a scenario that doesn't apply here. The
-// route module itself is kept for parity with upstream and is still exercised
-// directly by src/__tests__/review-access.test.ts.
+// Directory-review access (routes/review.tsx) only makes sense for
+// upstream's public multi-tenant model — it lets a directory reviewer bypass
+// QR login for a demo Telegram account, a scenario that doesn't apply to a
+// single-operator deployment. Mount it only when SINGLE_OPERATOR_MODE is off.
+if (!config.singleOperatorMode) {
+  app.route("/review", createReviewRoutes({ sessions }));
+}
 // Shared 2FA cloud-password back-channel for all QR flows (POST /qr/password).
 app.route("/qr", createQrPasswordRoutes());
 
