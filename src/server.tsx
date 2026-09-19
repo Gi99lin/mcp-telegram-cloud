@@ -47,10 +47,12 @@ if (!config.logUserIds && config.logHashSalt === SENTINEL_LOG_HASH_SALT) {
   );
 }
 
-// Admin credentials are required for this single-operator deployment.
-if (!config.adminUsername || !config.adminPasswordHash) {
+// Admin credentials are required only when SINGLE_OPERATOR_MODE is enabled —
+// this deployment mode is opt-in, so an unset flag must boot exactly like
+// upstream's original multi-tenant server, with no admin-credential demands.
+if (config.singleOperatorMode && (!config.adminUsername || !config.adminPasswordHash)) {
   throw new Error(
-    "ADMIN_USERNAME and ADMIN_PASSWORD_HASH are required to boot this single-operator deployment. " +
+    "ADMIN_USERNAME and ADMIN_PASSWORD_HASH are required when SINGLE_OPERATOR_MODE=true. " +
       "Generate the hash with: bun scripts/hash-admin-password.ts",
   );
 }

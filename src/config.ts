@@ -186,6 +186,12 @@ export const config = {
    * insecure (LOG_USER_IDS=false + sentinel salt). */
   logHashSalt: optional(process.env.LOG_HASH_SALT, SENTINEL_LOG_HASH_SALT),
 
+  /** Opt-in single-operator mode: gates /oauth/authorize, /login, /my/* behind
+   * an admin-login session instead of upstream's public per-visitor Telegram
+   * QR flow. Default false — unset reproduces upstream's original multi-tenant
+   * behavior exactly. See docs/superpowers/specs/2026-09-18-single-operator-auth-design.md. */
+  singleOperatorMode: process.env.SINGLE_OPERATOR_MODE === "true",
+
   databasePath: optional(process.env.DATABASE_PATH, "./data/cloud.db"),
   /** 0 = keep forever (no retention purge). */
   usageLogRetentionDays: intOr(process.env.USAGE_LOG_RETENTION_DAYS, 90),
