@@ -234,10 +234,12 @@ export async function handleOAuthQrLogin(
         if (outcome.ok && outcome.sessionString) {
           const telegram = await connectFromSession(sessions, outcome.sessionString);
           const me = await telegram.getMe();
-          // Single-operator fork: always save under the fixed owner id, never
-          // the self-reported Telegram identity (that was the multi-tenant
-          // model's whole trust boundary — removing it is the point).
-          const userId = config.ownerUserId;
+          // Single-operator mode: always save under the fixed owner id, never
+          // the self-reported Telegram identity — that identity is exactly
+          // what single-operator mode replaces as the trust boundary.
+          // Multi-tenant (default): upstream's original behavior, the
+          // self-reported Telegram identity IS the owner id.
+          const userId = config.singleOperatorMode ? config.ownerUserId : (me.username ?? String(me.id));
 
           // Save Telegram session
           sessions.saveSessionString(userId, outcome.sessionString);
