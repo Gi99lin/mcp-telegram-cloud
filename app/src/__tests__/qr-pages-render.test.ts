@@ -60,4 +60,36 @@ describe("authorize page render (SSR) — critical OAuth path", () => {
     expect(html).toContain('lang="es"');
     expect(html).toContain('content="noindex, nofollow"');
   });
+
+  it("shows the destination host, which the client name cannot fake", () => {
+    // `client_name` is chosen by whoever registered the client (registration is
+    // open, RFC 7591), so a page that only says "Claude" tells the person
+    // scanning nothing about where the code goes. The host must be visible.
+    const html = renderAuthorize({
+      ...base,
+      clientName: "Claude",
+      redirectUri: "https://evil.example/cb",
+      locale: "en",
+    });
+    expect(html).toContain("evil.example");
+    expect(html).toContain("Access code will be sent to:");
+  });
+
+  it("prefers the origin computed by the route over its own derivation", () => {
+    const html = renderAuthorize({
+      ...base,
+      redirectUri: "cursor://anysphere.cursor-mcp/oauth/callback",
+      redirectOriginKey: "cursor://anysphere.cursor-mcp",
+      locale: "en",
+    });
+    expect(html).toContain("cursor://anysphere.cursor-mcp");
+  });
+
+  it("localizes the destination label (ru)", () => {
+    const html = renderAuthorize({ ...base, locale: "ru" });
+    expect(html).toContain(
+      "\u041a\u043e\u0434 \u0434\u043e\u0441\u0442\u0443\u043f\u0430 \u0431\u0443\u0434\u0435\u0442 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d \u043d\u0430:",
+    );
+    expect(html).toContain("claude.ai");
+  });
 });

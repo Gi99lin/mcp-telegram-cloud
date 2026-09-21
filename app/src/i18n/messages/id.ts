@@ -23,6 +23,7 @@ export const id: Messages = {
     connected: "Terhubung!",
     sessionSaved: "Sesi disimpan. Anda dapat menutup halaman ini.",
     connectionLost: "Koneksi terputus. Segarkan untuk mencoba lagi.",
+    codeGoesTo: "Kode akses akan dikirim ke:",
   },
   twoFactor: {
     title: "Autentikasi dua faktor",

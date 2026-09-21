@@ -259,6 +259,10 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
         clientId,
         clientName: client.client_name,
         redirectUri,
+        // Where the code will actually be delivered. Shown on the page because
+        // scanning the QR IS the consent action, and `client_name` is chosen by
+        // whoever registered the client.
+        redirectOriginKey: originKey ?? redirectUri,
         state,
         codeChallenge,
         codeChallengeMethod,
@@ -273,6 +277,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
         clientId={clientId}
         clientName={client.client_name}
         redirectUri={redirectUri}
+        redirectOriginKey={originKey ?? redirectUri}
         state={state}
         codeChallenge={codeChallenge}
         codeChallengeMethod={codeChallengeMethod}

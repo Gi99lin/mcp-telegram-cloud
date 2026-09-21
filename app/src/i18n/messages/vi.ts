@@ -23,6 +23,7 @@ export const vi: Messages = {
     connected: "Đã kết nối!",
     sessionSaved: "Đã lưu phiên. Bạn có thể đóng trang này.",
     connectionLost: "Mất kết nối. Làm mới để thử lại.",
+    codeGoesTo: "Mã truy cập sẽ được gửi tới:",
   },
   twoFactor: {
     title: "Xác thực hai yếu tố",

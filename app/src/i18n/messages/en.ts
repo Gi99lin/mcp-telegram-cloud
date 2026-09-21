@@ -31,6 +31,10 @@ export const en = {
     connected: "Connected!",
     sessionSaved: "Session saved. You can close this page.",
     connectionLost: "Connection lost. Refresh to retry.",
+    /** Followed by the callback HOST on the authorize page \u2014 the part a
+     * registered `client_name` cannot fake. Keep it short: it renders on one
+     * line next to the host. */
+    codeGoesTo: "Access code will be sent to:",
   },
   twoFactor: {
     title: "Two-factor authentication",

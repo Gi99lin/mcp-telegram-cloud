@@ -23,6 +23,7 @@ export const ptBR: Messages = {
     connected: "Conectado!",
     sessionSaved: "Sessão salva. Você pode fechar esta página.",
     connectionLost: "Conexão perdida. Atualize para tentar novamente.",
+    codeGoesTo: "O código de acesso será enviado para:",
   },
   twoFactor: {
     title: "Autenticação de dois fatores",

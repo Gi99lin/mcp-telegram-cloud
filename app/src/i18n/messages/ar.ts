@@ -23,6 +23,7 @@ export const ar: Messages = {
     connected: "تم الاتصال!",
     sessionSaved: "تم حفظ الجلسة. يمكنك إغلاق هذه الصفحة.",
     connectionLost: "انقطع الاتصال. حدّث الصفحة للمحاولة مرة أخرى.",
+    codeGoesTo: "سيتم إرسال رمز الوصول إلى:",
   },
   twoFactor: {
     title: "المصادقة الثنائية",

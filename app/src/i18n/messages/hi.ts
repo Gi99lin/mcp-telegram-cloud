@@ -23,6 +23,7 @@ export const hi: Messages = {
     connected: "कनेक्ट हो गया!",
     sessionSaved: "सत्र सहेजा गया। आप यह पेज बंद कर सकते हैं।",
     connectionLost: "कनेक्शन टूट गया। पुनः प्रयास के लिए रिफ़्रेश करें।",
+    codeGoesTo: "एक्सेस कोड यहाँ भेजा जाएगा:",
   },
   twoFactor: {
     title: "दो-चरणीय प्रमाणीकरण",

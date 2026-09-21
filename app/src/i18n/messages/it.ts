@@ -23,6 +23,7 @@ export const it: Messages = {
     connected: "Connesso!",
     sessionSaved: "Sessione salvata. Puoi chiudere questa pagina.",
     connectionLost: "Connessione persa. Aggiorna per riprovare.",
+    codeGoesTo: "Il codice di accesso verrà inviato a:",
   },
   twoFactor: {
     title: "Autenticazione a due fattori",

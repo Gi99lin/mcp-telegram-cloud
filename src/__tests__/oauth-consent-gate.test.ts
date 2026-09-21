@@ -120,6 +120,20 @@ describe("GET /oauth/authorize — unknown destination cannot mint a code silent
     assert.equal(res.status, 302, "a returning user must not be asked to confirm again");
   });
 
+  it("names the destination on the QR page too, since scanning is the consent act", async () => {
+    // A first-time victim has no session, so they land on the QR page rather
+    // than the consent page. That page used to show only `client_name`, which
+    // the attacker picks at registration \u2014 "Claude" pointing at evil.example.
+    const { oauth, app } = setup({ sessionAlive: false });
+    const clientId = register(oauth, "https://evil.example/cb", "Claude");
+
+    const res = await app.request(authorizeUrl(clientId, "https://evil.example/cb"));
+    const html = await res.text();
+    assert.equal(res.status, 200);
+    assert.match(html, /evil\.example/, "the delivery destination must be on the page");
+    assert.match(html, /Access code will be sent to/i);
+  });
+
   it("does not let one approved destination approve another", async () => {
     const { oauth, app } = setup();
     oauth.recordGrant(USER, "https://claude.ai");
