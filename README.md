@@ -116,6 +116,50 @@ For the full upstream tool catalogue (including `send-message`,
 `forward-message`, group admin, profile write, etc.), use the CLI
 [`@overpod/mcp-telegram`](https://github.com/mcp-telegram/mcp-telegram).
 
+## Sending a local file
+
+The media tools (`telegram-send-file`, `telegram-send-album`,
+`telegram-send-voice`, `telegram-send-video-note`, `telegram-send-story`,
+`telegram-set-profile-photo`) never take a filesystem path: the server runs
+somewhere else, and MCP has no way to carry bytes in a tool call that would
+not first drag them through the model's context. They take a `source` that is
+either an `uploadId` or a public `https://` URL.
+
+Bytes therefore travel over plain HTTP, outside the MCP transport, to
+`POST /my/upload` — which accepts **the same OAuth access token your client
+uses for `/mcp`**:
+
+```sh
+# 1. upload the bytes -> uploadId (valid ~15 min, single use, bound to you)
+curl -s --http1.1 -X POST https://mcp.mcp-telegram.com/my/upload \
+  -H "authorization: Bearer $TOKEN" \
+  -F "file=@./screenshot.png;type=image/png"
+# {"id":"upl_…","expiresAt":"…","size":12345,"mime":"image/png"}
+
+# 2. hand that id to a tool
+#    telegram-send-file { chatId: "me",
+#                         source: { kind: "upload", uploadId: "upl_…" },
+#                         caption: "…" }
+```
+
+`$TOKEN` is the access token your MCP client obtained during the OAuth flow;
+where it is stored depends on the client (credential store, config file,
+keychain). Any token that can call `/mcp` can call `/my/upload` — there is no
+separate grant to request.
+
+Notes:
+
+- The `uploadId` is bound to the token's account, single-use, and expires
+  (`UPLOAD_TTL_SECONDS`, 15 min by default). Upload immediately before the
+  tool call, not in advance.
+- Per-file cap 50 MB, per-account pending quota 100 MB, and the endpoint is
+  rate-limited per token — see [configuration](docs/configuration.md).
+- Clients that cannot make arbitrary HTTP requests (no shell, no fetch tool)
+  cannot use this path. For them the only option is a public `https://` URL,
+  which the server fetches behind an SSRF guard.
+- Browser uploads at `/my/uploads` still work exactly as before and remain
+  CSRF-protected; the token path is for programmatic clients.
+
 ## Architecture
 
 - **Transport**: Streamable HTTP (`/mcp`)

@@ -24,7 +24,10 @@ const sourceSchema = z
         .string()
         .min(1)
         .describe(
-          "Opaque upload ID returned by POST /my/upload (e.g. 'upl_a8f3...'). User-scoped, single-use, expires in ~15min.",
+          "Opaque upload ID returned by POST /my/upload (e.g. 'upl_a8f3...'). User-scoped, single-use, expires in ~15min. " +
+            "To send a LOCAL file: POST it to /my/upload on this server with the same OAuth Bearer token as this MCP session " +
+            "(curl -X POST <server>/my/upload -H 'authorization: Bearer <token>' -F 'file=@/path/to/file'), then pass the " +
+            "response's `id` here. No Origin/Referer needed on the token path.",
         ),
     }),
     z.object({
@@ -38,7 +41,8 @@ const sourceSchema = z
     }),
   ])
   .describe(
-    "Where to get the file bytes. Either an upload ID (user uploaded via /my/upload) or an https:// URL (the cloud fetches it).",
+    "Where to get the file bytes: an upload ID (bytes POSTed to /my/upload, by the user in the dashboard or by you with your " +
+      "OAuth token) or an https:// URL the cloud fetches. Local filesystem paths are NOT accepted — upload the bytes first.",
   );
 
 type SourceArg = z.infer<typeof sourceSchema>;
