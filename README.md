@@ -152,6 +152,12 @@ Notes:
 - The `uploadId` is bound to the token's account, single-use, and expires
   (`UPLOAD_TTL_SECONDS`, 15 min by default). Upload immediately before the
   tool call, not in advance.
+- The **filename you upload with is what the recipient sees**, and it also
+  decides the MIME type Telegram reports, so send `report.md`, not `blob`. The
+  name is sanitized server-side (leaf name only, control/bidi characters
+  stripped, 255-byte cap); if nothing usable survives, the document is sent
+  unnamed rather than under a guessed name. For the `https://` URL source the
+  name comes from the last path segment of the URL.
 - Per-file cap 50 MB, per-account pending quota 100 MB, and the endpoint is
   rate-limited per token — see [configuration](docs/configuration.md).
 - Clients that cannot make arbitrary HTTP requests (no shell, no fetch tool)
