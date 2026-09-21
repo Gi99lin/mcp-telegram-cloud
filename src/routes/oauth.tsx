@@ -6,9 +6,11 @@ import { decideTgUserCookie } from "../cookie-handler.js";
 import { logger, logUser } from "../logger.js";
 import type { OAuthProvider } from "../oauth.js";
 import { AuthorizePage } from "../pages/AuthorizePage.js";
+import { ConsentPage } from "../pages/ConsentPage.js";
 import { handleOAuthQrLogin } from "../qr-login.js";
 import { oauthRateLimit, registerRateLimit } from "../rate-limit.js";
 import { detectRequestLocale, islandScripts, reactPagesAvailable, renderReactPage } from "../react-pages.js";
+import { redirectOrigin } from "../redirect-origin.js";
 import { matchRedirectUri } from "../redirect-uri-matcher.js";
 import type { SessionManager } from "../session-manager.js";
 import { incr, OAUTH_FLOW } from "../telemetry/metrics.js";
@@ -22,6 +24,37 @@ function getUserIdHint(c: Context): string | undefined {
   const cookies = c.req.header("cookie") ?? "";
   const match = cookies.match(/tg_user=([^;]+)/);
   return match ? decodeURIComponent(match[1]) : undefined;
+}
+
+/**
+ * Registered redirect URIs for a client. The column is written by our own
+ * registration code as a JSON array, but a hand-edited or half-migrated row
+ * must not turn /authorize into a 500. Unparsable becomes an empty list, which
+ * fails CLOSED at matchRedirectUri ("Invalid redirect_uri"), never open.
+ */
+function parsedRedirectUris(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((u): u is string => typeof u === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Build the `redirect_uri?code=…&state=…` destination. Returns null when the
+ * URI cannot be parsed; callers must then refuse rather than redirect to
+ * something half-formed. In practice matchRedirectUri has already accepted it.
+ */
+function buildCodeRedirect(redirectUri: string, code: string, state: string): string | null {
+  try {
+    const url = new URL(redirectUri);
+    url.searchParams.set("code", code);
+    if (state) url.searchParams.set("state", state);
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 async function parseTokenParams(c: Context): Promise<Record<string, string>> {
@@ -149,7 +182,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("Unknown client", 400);
     }
 
-    const allowedUris: string[] = JSON.parse(client.redirect_uris);
+    const allowedUris = parsedRedirectUris(client.redirect_uris);
     if (!matchRedirectUri(allowedUris, redirectUri)) {
       incr(OAUTH_FLOW, { step: "authorize", outcome: "bad_redirect" });
       return c.text("Invalid redirect_uri", 400);
@@ -163,11 +196,39 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
     }
 
-    // Fast path: if we have a cookie hint and session is valid, skip QR entirely (HTTP 302)
+    // Fast path: if we have a cookie hint and session is valid, skip QR entirely (HTTP 302).
+    //
+    // GATED: the silent path runs only for a destination this account has
+    // already connected. The cookie is ambient authority — it rides along on an
+    // ordinary link click (SameSite=Lax) — so ungated, a stranger who registered
+    // a client through open RFC 7591 registration could turn one click into a
+    // full authorization code for the victim's Telegram (verified against prod
+    // before this fix). Unknown destination ⇒ ask the human first. Returning
+    // users see no change: hasGrant() also counts tokens they already hold.
     const userIdHint = getUserIdHint(c);
+    const originKey = redirectOrigin(redirectUri);
 
     if (userIdHint) {
       const telegram = await sessions.tryReconnectSession(userIdHint);
+      if (telegram && !(originKey && oauth.hasGrant(userIdHint, originKey))) {
+        incr(OAUTH_FLOW, { step: "authorize", outcome: "consent_required" });
+        logger.info(`Consent required for ${logUser(userIdHint)}`, {
+          component: "oauth",
+          event: "oauth.consent.required",
+          userId: logUser(userIdHint),
+        });
+        return c.html(
+          <ConsentPage
+            clientId={clientId}
+            clientName={client.client_name}
+            redirectUri={redirectUri}
+            redirectOriginKey={originKey ?? redirectUri}
+            state={state}
+            codeChallenge={codeChallenge}
+            codeChallengeMethod={codeChallengeMethod}
+          />,
+        );
+      }
       if (telegram) {
         const code = oauth.createAuthCode({
           clientId,
@@ -176,9 +237,8 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
           codeChallenge,
           codeChallengeMethod,
         });
-        const url = new URL(redirectUri);
-        url.searchParams.set("code", code);
-        if (state) url.searchParams.set("state", state);
+        const target = buildCodeRedirect(redirectUri, code, state);
+        if (!target) return c.text("Invalid redirect_uri", 400);
 
         logger.info(`Fast OAuth redirect for ${logUser(userIdHint)} (302)`, {
           component: "oauth",
@@ -187,7 +247,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
         });
 
         incr(OAUTH_FLOW, { step: "authorize", outcome: "fast_redirect" });
-        return c.redirect(url.toString(), 302);
+        return c.redirect(target, 302);
       }
     }
 
@@ -232,7 +292,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("Unknown client", 400);
     }
 
-    const allowedUris: string[] = JSON.parse(client.redirect_uris);
+    const allowedUris = parsedRedirectUris(client.redirect_uris);
     if (!matchRedirectUri(allowedUris, redirectUri)) {
       incr(OAUTH_FLOW, { step: "authorize_qr", outcome: "bad_redirect" });
       return c.text("Invalid redirect_uri", 400);
@@ -245,7 +305,13 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
     }
 
-    const userIdHint = getUserIdHint(c);
+    // Same gate as GET /authorize, closing the side door: this stream's
+    // session-reuse branch also mints a code from the cookie alone. An
+    // ungranted destination drops the hint, so the visitor must actually scan
+    // the QR \u2014 a deliberate act \u2014 instead of the code appearing by itself.
+    const rawHint = getUserIdHint(c);
+    const qrOriginKey = redirectOrigin(redirectUri);
+    const userIdHint = rawHint && qrOriginKey && oauth.hasGrant(rawHint, qrOriginKey) ? rawHint : undefined;
 
     const stream = await handleOAuthQrLogin(
       sessions,
@@ -262,6 +328,84 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
         Connection: "keep-alive",
       },
     });
+  });
+
+  /**
+   * Explicit approval of a not-yet-connected destination (the ConsentPage form).
+   *
+   * Every precondition of GET /authorize is re-checked here rather than trusted
+   * from the form: the hidden fields are client-side data, and a user who was
+   * shown a page for client A must not be able to submit it for client B.
+   *
+   * CSRF, three independent layers:
+   *   1. POST-only \u2014 no <img>/<link> can trigger it.
+   *   2. Origin must equal the issuer \u2014 a cross-site form post is rejected.
+   *   3. The tg_user cookie is SameSite=Lax, so it is not even attached to a
+   *      cross-site POST; without it there is no session to authorize.
+   */
+  app.post("/authorize/approve", async (c) => {
+    if (c.req.header("origin") !== config.issuer) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "bad_origin" });
+      return c.text("Forbidden", 403);
+    }
+
+    const form = await c.req.parseBody().catch(() => null);
+    const field = (name: string): string => {
+      const v = form?.[name];
+      return typeof v === "string" ? v : "";
+    };
+    const clientId = field("client_id");
+    const redirectUri = field("redirect_uri");
+    const state = field("state");
+    const codeChallenge = field("code_challenge");
+    const codeChallengeMethod = field("code_challenge_method") || "S256";
+
+    const client = oauth.getClient(clientId);
+    if (!client) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "unknown_client" });
+      return c.text("Unknown client", 400);
+    }
+    if (!matchRedirectUri(parsedRedirectUris(client.redirect_uris), redirectUri)) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "bad_redirect" });
+      return c.text("Invalid redirect_uri", 400);
+    }
+    if (!codeChallenge || codeChallengeMethod !== "S256") {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "bad_pkce" });
+      return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
+    }
+
+    const userId = getUserIdHint(c);
+    if (!userId) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "no_session" });
+      return c.text("No active session \u2014 start again from your client", 403);
+    }
+    // Prove the session is real, exactly like the fast path does. A cookie
+    // value alone is a claim, not a credential.
+    const telegram = await sessions.tryReconnectSession(userId);
+    if (!telegram) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "session_invalid" });
+      return c.text("Session expired \u2014 start again from your client", 403);
+    }
+
+    const originKey = redirectOrigin(redirectUri);
+    if (!originKey) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "bad_redirect" });
+      return c.text("Invalid redirect_uri", 400);
+    }
+    oauth.recordGrant(userId, originKey);
+
+    const code = oauth.createAuthCode({ clientId, userId, redirectUri, codeChallenge, codeChallengeMethod });
+    const target = buildCodeRedirect(redirectUri, code, state);
+    if (!target) return c.text("Invalid redirect_uri", 400);
+
+    logger.info(`Connection approved by ${logUser(userId)}`, {
+      component: "oauth",
+      event: "oauth.consent.approved",
+      userId: logUser(userId),
+      clientId,
+    });
+    incr(OAUTH_FLOW, { step: "approve", outcome: "ok" });
+    return c.redirect(target, 302);
   });
 
   // Server-side setter for the `tg_user` hint cookie. Called from the
