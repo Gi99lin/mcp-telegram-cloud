@@ -116,6 +116,53 @@ Never expose port 3000 directly. Front the service with:
 Terminate TLS at the proxy and forward to the container over a private
 network.
 
+**QR login needs an unbuffered stream.** `/oauth/authorize/qr` (and
+`/login/qr`, `/accounts/*/qr`) push the QR code and the "scanned" event
+over Server-Sent Events. nginx buffers proxied responses by default, so
+a plain `proxy_pass` block holds the QR event in its buffer instead of
+flushing it to the browser — the page shows a spinner ("Connecting…")
+and never renders a QR code, even though the container already
+generated one. Disable buffering for this app:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 90s;
+    add_header X-Accel-Buffering no;
+}
+```
+
+To tell this apart from the other common cause (outbound connection to
+Telegram's servers blocked or filtered — common on some hosting
+providers/regions): watch `docker compose logs -f cloud` while you
+retry the QR page. If a log line shows the QR token/login being
+generated but the browser never updates, it's nginx buffering (fix
+above). If instead you see GramJS connection timeouts/errors trying to
+reach Telegram, set `TELEGRAM_LOG_LEVEL=debug` temporarily for detail,
+and configure an outbound proxy in `.env`:
+
+```env
+# MTProxy
+TELEGRAM_PROXY_IP=1.2.3.4
+TELEGRAM_PROXY_PORT=443
+TELEGRAM_PROXY_SECRET=<mtproxy-secret>
+
+# — or SOCKS5 instead of MTProxy —
+TELEGRAM_PROXY_IP=1.2.3.4
+TELEGRAM_PROXY_PORT=1080
+TELEGRAM_PROXY_SOCKS_TYPE=5
+TELEGRAM_PROXY_USERNAME=optional
+TELEGRAM_PROXY_PASSWORD=optional
+```
+
+Restart the container after editing `.env` (`docker compose -f
+docker-compose.example.yml up -d`, no rebuild needed — these are runtime
+env vars, not build args).
+
 ### 5. Configure OAuth rate limits
 
 Defaults (30 requests / 60s per IP across `/oauth/*`) are tuned for a
@@ -169,10 +216,27 @@ Pointing `SIGNOZ_ENDPOINT` at a remote OTLP collector lets you correlate
 `rate_limit.exceeded` and `http.request` events across replicas. Logs
 are PII-safe by default when `LOG_USER_IDS=false`.
 
-### 10. Public copy — what to review before you publish
+### 10. No landing page — `/`, `/privacy`, `/terms` 404 by design
 
-The four served HTML pages — **landing** (`/`), **authorize** (`/oauth/authorize`),
-**privacy** (`/privacy`), **terms** (`/terms`) — pull all visible
+Following the Quick start above (`docker-compose.example.yml` + your own
+reverse proxy) gets you a functional-only host: `/`, `/privacy` and
+`/terms` return 404. This is expected, not a broken deployment — those
+pages were dropped from this app in favor of the operator's own
+separate marketing/content site, routed at the proxy layer (see commit
+`a0d02ec`, "drop LandingPage/PrivacyPage/TermsPage"). This app only ever
+serves the *functional* surface: `/health`, `/oauth/*`, `/login`,
+`/admin-login`, `/my/*`, `/mcp`, `/api/*`. If your Claude.ai / ChatGPT
+connector's "Server URL" points at the bare origin instead of
+`https://your-domain/mcp`, you'll hit this 404 and it will look like the
+whole thing is down — it isn't; just fix the URL you register.
+
+If you want a landing/privacy/terms page, stand up your own static site
+or content container and route those three paths to it at the proxy
+(nginx/Caddy/Traefik) — do not expect this repo to serve them.
+
+### 10a. Public copy — what to review before you publish
+
+The **authorize** page (`/oauth/authorize`) pulls all visible
 branding and links from your config:
 
 | Surface | What's templated | Env vars |
@@ -183,51 +247,10 @@ branding and links from your config:
 | Email / Telegram contact lines | `CONTACT_EMAIL`, `CONTACT_TELEGRAM` | both |
 | Canonical URLs in `<link rel="canonical">` | `ISSUER` | `ISSUER` |
 
-If you set those env vars, every page renders with your branding —
-**but the legal and editorial substance still describes how the
-upstream hosted service operates**. Read each page on a staging
-deployment of your fork and rewrite anything that doesn't match your
-operation. Treat what ships in the repo as a starting template, not
-legal advice.
-
-Specific paragraphs almost everyone needs to revisit:
-
-- **Landing → hero subtitle, FAQ** — the FAQ assumes a specific tier
-  layout (free, hosted, OpenAI Apps). If you charge or run privately,
-  trim the affected sections.
-- **Privacy → "What we collect" / "What we do NOT collect"** — confirm
-  the list matches your real logging (`LOG_USER_IDS`,
-  `USAGE_LOG_RETENTION_DAYS`, your own SigNoz attributes). The default
-  text claims usage logs include the Telegram user ID; if you set
-  `LOG_USER_IDS=false`, say so.
-- **Privacy → "Data retention"** — surfaces the same retention number
-  you set in `USAGE_LOG_RETENTION_DAYS`. Update if you keep logs longer
-  for support reasons.
-- **Privacy → "Third parties"** — the default text says the operator
-  does not sell data. If you ship logs to a third-party APM, name it.
-- **Privacy → "Security"** — references TLS + dedicated infrastructure.
-  Update if you run inside a shared environment or skip the proxy.
-- **Privacy → "Your rights" → "Self-host option"** — currently links
-  back to the upstream open-source repo via `SOURCE_REPO_URL`. Consider
-  whether a self-hoster forking again is the workflow you want to
-  recommend; many private deployments delete this paragraph entirely.
-- **Terms → "Acceptance" / "Permitted use"** — reference your
-  `BRAND_NAME` automatically, but the lawful-use clauses reflect a
-  read-only public service. If you enable destructive tools or run a
-  private deployment, rewrite scope and acceptable-use accordingly.
-- **Terms → "Service availability" / "Limitation of liability"** —
-  bundled wording is generic English boilerplate. Have a lawyer in your
-  jurisdiction review before publishing.
-- **Terms → "Changes"** — says material changes are communicated "via
-  the website". If you only operate a private group, point users at
-  whatever channel you actually use (email list, internal wiki, etc.).
-- **Both pages → "Last updated"** — bump the date when you finish
-  rewriting. Bots and audits read it.
-
-If you do not run a public-facing service and just self-host for
-yourself or a closed team, consider deleting both Privacy and Terms
-entirely (remove the routes from `src/server.tsx`) instead of shipping
-inaccurate boilerplate.
+If you set those env vars, the authorize/login pages render with your
+branding. There is no separate legal/editorial copy to review here —
+this app doesn't ship Privacy or Terms pages (see §10 above); write and
+host those yourself if your deployment needs them.
 
 ## Incident response
 
