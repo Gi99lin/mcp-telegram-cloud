@@ -5,17 +5,22 @@ import { isAdminSessionValid } from "../auth/admin.js";
 import { config } from "../config.js";
 import type { DestructiveGuard } from "../destructive-guard.js";
 import { logger, logUser } from "../logger.js";
+import type { OAuthProvider } from "../oauth.js";
 import { AuditPage } from "../pages/AuditPage.js";
 import { SettingsPage } from "../pages/SettingsPage.js";
 import { UploadsPage, type UploadsPageProps } from "../pages/UploadsPage.js";
+import { makeUploadRateLimit } from "../rate-limit.js";
 import { detectRequestLocale, islandScripts, reactPagesAvailable, renderReactPage } from "../react-pages.js";
 import type { SessionManager } from "../session-manager.js";
 import type { UploadStore } from "../upload-store.js";
+import { MCP_RESOURCE_METADATA_PATH, rootUrl } from "./oauth.js";
 
 export interface MyRoutesDeps {
   destructive: DestructiveGuard;
   sessions: SessionManager;
   uploads: UploadStore;
+  /** Token validator for the Bearer path on `POST /my/upload` (MCP agents). */
+  oauth: Pick<OAuthProvider, "validateToken">;
 }
 
 /**
@@ -54,6 +59,29 @@ function requireUser(c: Context, sessions: SessionManager): string | null {
   return username;
 }
 
+/** Who is uploading, and by which credential — the two paths differ in CSRF
+ * exposure, so the branch has to stay visible at the call site. */
+type UploadCaller = { userId: string; via: "bearer" | "cookie" };
+
+/**
+ * Resolve the uploader for `POST /my/upload`.
+ *
+ * Bearer wins over cookie when both are present: a token is a deliberate
+ * statement of intent by a client, a cookie is ambient browser authority.
+ * An invalid Bearer is a hard stop and never falls through to the cookie —
+ * otherwise an agent holding a stale token would silently start writing as
+ * whoever happens to be logged in to the same browser profile.
+ */
+function resolveUploader(c: Context, deps: MyRoutesDeps): UploadCaller | null {
+  const auth = c.req.header("authorization");
+  if (auth?.startsWith("Bearer ")) {
+    const tokenInfo = deps.oauth.validateToken(auth.slice(7));
+    return tokenInfo ? { userId: tokenInfo.userId, via: "bearer" } : null;
+  }
+  const userId = requireUser(c, deps.sessions);
+  return userId ? { userId, via: "cookie" } : null;
+}
+
 function unauthorizedRedirect(c: Context): Response {
   return c.redirect(config.singleOperatorMode ? "/admin-login" : `${config.issuer}/login`, 302);
 }
@@ -68,8 +96,10 @@ function originMatchesIssuer(headerValue: string): boolean {
   }
 }
 
-export function createMyRoutes({ destructive, sessions, uploads }: MyRoutesDeps): Hono {
+export function createMyRoutes(deps: MyRoutesDeps): Hono {
+  const { destructive, sessions, uploads } = deps;
   const app = new Hono({ strict: false });
+  const uploadRateLimit = makeUploadRateLimit();
 
   app.get("/", (c) => c.redirect("/my/settings", 302));
 
@@ -108,6 +138,9 @@ export function createMyRoutes({ destructive, sessions, uploads }: MyRoutesDeps)
   const UPLOAD_BODY_SLACK_BYTES = 1024 * 1024;
   app.post(
     "/upload",
+    // Rate limit runs BEFORE bodyLimit so a flood is rejected without reading
+    // (and buffering) each body first.
+    uploadRateLimit,
     bodyLimit({
       maxSize: config.uploadFileMaxBytes + UPLOAD_BODY_SLACK_BYTES,
       onError: (c) =>
@@ -120,13 +153,30 @@ export function createMyRoutes({ destructive, sessions, uploads }: MyRoutesDeps)
         ),
     }),
     async (c) => {
-      const userId = requireUser(c, sessions);
-      if (!userId) return c.json({ error: "unauthorized" }, 401);
+      const caller = resolveUploader(c, deps);
+      if (!caller) {
+        // Point token-bearing clients at the discovery document, same as /mcp,
+        // so a 401 is actionable instead of a dead end.
+        return c.json({ error: "unauthorized" }, 401, {
+          "WWW-Authenticate": `Bearer resource_metadata="${rootUrl(config.issuer, MCP_RESOURCE_METADATA_PATH)}"`,
+        });
+      }
+      const userId = caller.userId;
 
-      // CSRF: same-origin only, identical to /settings POST.
-      const headerValue = c.req.header("origin") ?? c.req.header("referer");
-      if (!headerValue || !originMatchesIssuer(headerValue)) {
-        return c.json({ error: "forbidden" }, 403);
+      // CSRF: same-origin only, identical to /settings POST — but ONLY for the
+      // cookie path. CSRF exists because a browser attaches cookies to a
+      // cross-site request automatically; a Bearer token is never attached
+      // automatically. Moreover, an `Authorization` header makes the request
+      // non-simple, so a hostile page can't even reach this branch without a
+      // CORS preflight that we never answer (no CORS middleware on /my/*).
+      // Do not "restore symmetry" by applying the check to Bearer: that is
+      // what made the route unusable for agents in the first place, since an
+      // MCP client has neither Origin nor Referer.
+      if (caller.via === "cookie") {
+        const headerValue = c.req.header("origin") ?? c.req.header("referer");
+        if (!headerValue || !originMatchesIssuer(headerValue)) {
+          return c.json({ error: "forbidden" }, 403);
+        }
       }
 
       let form: FormData;
@@ -147,6 +197,7 @@ export function createMyRoutes({ destructive, sessions, uploads }: MyRoutesDeps)
           component: "uploads",
           userId: logUser(userId),
           event: "uploads.denied",
+          source: caller.via,
           reason: denied.reason,
           size: buf.byteLength,
         });
@@ -165,6 +216,7 @@ export function createMyRoutes({ destructive, sessions, uploads }: MyRoutesDeps)
         component: "uploads",
         userId: logUser(userId),
         event: "uploads.stored",
+        source: caller.via,
         uploadId: result.id,
         size: buf.byteLength,
         mime: file.type,

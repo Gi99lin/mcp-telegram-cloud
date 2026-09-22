@@ -5,6 +5,7 @@ import type { TelegramService } from "@overpod/mcp-telegram/service";
 import { config, iconPng256Url, iconPngUrl, iconUrl } from "./config.js";
 import { isDeadlineError, withDeadline } from "./deadline.js";
 import { type DestructiveGuard, summarizeArgs } from "./destructive-guard.js";
+import { MCP_SSE_KEEP_ALIVE_MS } from "./http-timeouts.js";
 import { logger, logUser } from "./logger.js";
 import { CLIENT_CLASSES, type ClientClass, classifyClient } from "./middleware/classify-client.js";
 import type { OAuthProvider } from "./oauth.js";
@@ -386,6 +387,9 @@ async function handleMcpRequestInner(
   // New session — create MCP server + transport
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
+    // Pinned, not inherited: the SDK default (15s) must stay comfortably under
+    // the server's socket idle timeout, or quiet streams die as upstream 500s.
+    keepAliveMs: MCP_SSE_KEEP_ALIVE_MS,
     onsessioninitialized: (sid) => {
       transports.set(sid, transport);
       sessionOwners.set(sid, userId);

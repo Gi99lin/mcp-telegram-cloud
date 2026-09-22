@@ -23,6 +23,7 @@ export const nl: Messages = {
     connected: "Verbonden!",
     sessionSaved: "Sessie opgeslagen. Je kunt deze pagina sluiten.",
     connectionLost: "Verbinding verbroken. Vernieuw om opnieuw te proberen.",
+    codeGoesTo: "De toegangscode wordt verzonden naar:",
   },
   twoFactor: {
     title: "Tweestapsverificatie",

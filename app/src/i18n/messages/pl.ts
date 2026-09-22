@@ -23,6 +23,7 @@ export const pl: Messages = {
     connected: "Połączono!",
     sessionSaved: "Sesja zapisana. Możesz zamknąć tę stronę.",
     connectionLost: "Utracono połączenie. Odśwież, aby spróbować ponownie.",
+    codeGoesTo: "Kod dostępu zostanie wysłany do:",
   },
   twoFactor: {
     title: "Uwierzytelnianie dwuskładnikowe",

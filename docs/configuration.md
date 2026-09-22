@@ -40,6 +40,11 @@ permissions), see [`docs/self-hosting.md`](./self-hosting.md).
 | `FREE_TIER_LIMIT` | | `100` | Per-user daily tool-call quota. `0` = unlimited |
 | `OAUTH_RATE_LIMIT` | | `30` | Requests per IP per window on `/oauth/*`. `0` disables |
 | `OAUTH_RATE_WINDOW_MS` | | `60000` | Window duration in milliseconds |
+| `UPLOAD_RATE_LIMIT` | | `20` | Uploads per Bearer token (or IP) per window on `/my/upload`. `0` disables |
+| `UPLOAD_RATE_WINDOW_MS` | | `60000` | Window duration in milliseconds |
+| `UPLOAD_FILE_MAX_BYTES` | | `52428800` | Per-file cap for `/my/upload` (50 MB) |
+| `UPLOAD_QUOTA_BYTES` | | `104857600` | Per-account pending-upload quota (100 MB) |
+| `UPLOAD_TTL_SECONDS` | | `900` | Lifetime of an unused `uploadId` |
 
 ## Required core
 
@@ -274,6 +279,28 @@ revoke). Default `30 / 60_000` = 30 requests per 60 seconds per IP.
 
 The IP is detected from `X-Real-IP` then `X-Forwarded-For` last hop;
 ensure your reverse proxy sets one of these.
+
+### `UPLOAD_RATE_LIMIT` / `UPLOAD_RATE_WINDOW_MS`
+
+Limit on `POST /my/upload`, keyed by the Bearer token when one is present
+and by IP otherwise. Default `20 / 60_000` = 20 uploads per minute.
+
+The byte limits below cap how much can be *pending* at once, not how much
+traffic the endpoint will accept: consuming an `uploadId` frees the quota
+immediately, so without a rate limit a scripted client could write
+`UPLOAD_FILE_MAX_BYTES` to disk in a loop indefinitely. The dashboard never
+reaches this limit (a person picks files one at a time); it exists because
+the endpoint also accepts OAuth tokens from MCP clients.
+
+### `UPLOAD_FILE_MAX_BYTES` / `UPLOAD_QUOTA_BYTES` / `UPLOAD_TTL_SECONDS`
+
+Per-file cap (default 50 MB), per-account sum of pending uploads (default
+100 MB), and how long an unused `uploadId` survives before the purge takes
+it (default 900 s). Apply identically to browser and token uploads.
+
+Oversize bodies are rejected with `413` before the multipart parser
+allocates; a quota breach returns `429`. Both are enforced twice (preflight
+and at write) to close the race between them.
 
 ### `REVIEW_RATE_LIMIT` / `REVIEW_RATE_WINDOW_MS`
 

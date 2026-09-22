@@ -23,6 +23,7 @@ export const ko: Messages = {
     connected: "연결됨!",
     sessionSaved: "세션이 저장되었습니다. 이 페이지를 닫아도 됩니다.",
     connectionLost: "연결이 끊겼습니다. 다시 시도하려면 새로고침하세요.",
+    codeGoesTo: "액세스 코드 전송 대상:",
   },
   twoFactor: {
     title: "2단계 인증",

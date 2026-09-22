@@ -49,10 +49,37 @@ async function connectFromSession(sessions: SessionManager, sessionString: strin
   return telegram;
 }
 
-/** Handle QR login via SSE stream */
+/**
+ * Storage key for a freshly authenticated Telegram account.
+ *
+ * Derived ONLY from the account that actually signed in. Exported so the rule
+ * is unit-testable and so call sites cannot quietly reintroduce a
+ * caller-supplied id: `/login/qr?userId=` is chosen by whoever opens the page,
+ * and using it as the key let an attacker overwrite a victim's session row.
+ */
+export function sessionKeyForAccount(me: { username?: string | null; id: unknown }): string {
+  return me.username ?? String(me.id);
+}
+
+/**
+ * Handle QR login via SSE stream.
+ *
+ * `requestedUserId` is a HINT ONLY (it comes from `?userId=` on /login/qr, i.e.
+ * from whoever opened the page). It may be used to look up an existing session,
+ * but it must never decide where a NEW session is stored: the storage key comes
+ * from `getMe()` after the scan, so the row is owned by the account that
+ * actually authenticated.
+ *
+ * Before this, `saveSessionString(requestedUserId, \u2026)` combined with
+ * `ON CONFLICT(user_id) DO UPDATE` let anyone pass a victim's handle, scan with
+ * their OWN phone and overwrite the victim's stored session \u2014 after which the
+ * victim's still-valid OAuth tokens drove the attacker's Telegram account. The
+ * OAuth variant of this flow (handleOAuthQrLogin below) always derived the id
+ * from getMe(); this one did not, and that asymmetry was the whole bug.
+ */
 export async function handleQrLogin(
   sessions: SessionManager,
-  userId: string,
+  requestedUserId: string,
   signal: AbortSignal,
 ): Promise<ReadableStream<Uint8Array>> {
   const encoder = new TextEncoder();
@@ -81,7 +108,7 @@ export async function handleQrLogin(
       signal.addEventListener("abort", () => clearInterval(heartbeat), { once: true });
 
       try {
-        const telegram = await sessions.getOrCreateSession(userId);
+        const telegram = await sessions.getOrCreateSession(requestedUserId);
 
         // Check if already connected
         if (await telegram.ensureConnected()) {
@@ -102,6 +129,15 @@ export async function handleQrLogin(
           // entry under this userId.
           const fresh = await connectFromSession(sessions, outcome.sessionString);
           const me = await fresh.getMe();
+          // Identity comes from the scanned account, never from the query param.
+          const userId = sessionKeyForAccount(me);
+          if (userId !== requestedUserId) {
+            logger.info("QR login stored under the scanned account, not the requested id", {
+              component: "qr-login",
+              event: "qr.identity.mismatch",
+              userId: logUser(userId),
+            });
+          }
           sessions.saveSessionString(userId, outcome.sessionString);
           await sessions.adoptSession(userId, fresh);
           send("connected", { name: me.firstName, username: me.username, id: me.id });
@@ -330,7 +366,11 @@ export async function handleAddAccountQr(
           }
           try {
             controller.enqueue(encoder.encode(`: ping\n\n`));
-          } catch {}
+          } catch {
+            // Stream already closed/errored by the peer \u2014 the heartbeat has nothing
+            // left to keep warm. `finally` clears the interval; logging here would
+            // emit one line per disconnected client per tick for no diagnostic gain.
+          }
         }, SSE_HEARTBEAT_INTERVAL_MS);
         signal.addEventListener(
           "abort",

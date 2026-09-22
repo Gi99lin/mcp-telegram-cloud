@@ -4,6 +4,7 @@ import "dotenv/config";
 import { Hono } from "hono";
 import { config, SENTINEL_LOG_HASH_SALT } from "./config.js";
 import { DestructiveGuard } from "./destructive-guard.js";
+import { HTTP_IDLE_TIMEOUT_S } from "./http-timeouts.js";
 import { startDrain } from "./lifecycle.js";
 import { logger, logUser } from "./logger.js";
 import { getActiveSessionsByClient, startIdleReaper, stopIdleReaper } from "./mcp-handler.js";
@@ -264,7 +265,7 @@ app.route("/api", createAdminRoutes({ oauth, sessions, usage }));
 registerMcpRoutes(app, { oauth, sessions, usage, destructive, uploads });
 app.route("/admin-login", createAdminLoginRoutes());
 app.route("/login", createLoginRoutes({ sessions }));
-app.route("/my", createMyRoutes({ destructive, sessions, uploads }));
+app.route("/my", createMyRoutes({ destructive, sessions, uploads, oauth }));
 app.route("/accounts", createAccountsRoutes({ sessions }));
 // Directory-review access (routes/review.tsx) only makes sense for
 // upstream's public multi-tenant model — it lets a directory reviewer bypass
@@ -315,7 +316,10 @@ logger.info(`${config.brandName} starting on port ${config.port}`, {
   event: "server.start",
   issuer: config.issuer,
 });
-const httpServer = Bun.serve({ fetch: app.fetch, port: config.port });
+// idleTimeout is explicit on purpose: Bun's 10s default is shorter than the MCP
+// SSE keep-alive, which silently turned every quiet stream into a Traefik 500.
+// See src/http-timeouts.ts for the measurement.
+const httpServer = Bun.serve({ fetch: app.fetch, port: config.port, idleTimeout: HTTP_IDLE_TIMEOUT_S });
 
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, async () => {

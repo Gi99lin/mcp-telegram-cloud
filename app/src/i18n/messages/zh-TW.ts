@@ -23,6 +23,7 @@ export const zhTW: Messages = {
     connected: "已連接！",
     sessionSaved: "工作階段已儲存。你可以關閉此頁面。",
     connectionLost: "連線已中斷。重新整理以重試。",
+    codeGoesTo: "存取碼將傳送至：",
   },
   twoFactor: {
     title: "兩步驟驗證",

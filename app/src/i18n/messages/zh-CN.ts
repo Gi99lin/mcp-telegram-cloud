@@ -23,6 +23,7 @@ export const zhCN: Messages = {
     connected: "已连接！",
     sessionSaved: "会话已保存。你可以关闭此页面。",
     connectionLost: "连接已断开。刷新以重试。",
+    codeGoesTo: "访问代码将发送至：",
   },
   twoFactor: {
     title: "两步验证",

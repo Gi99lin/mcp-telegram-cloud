@@ -23,6 +23,7 @@ export const ja: Messages = {
     connected: "接続しました！",
     sessionSaved: "セッションを保存しました。このページを閉じてかまいません。",
     connectionLost: "接続が切断されました。再試行するには更新してください。",
+    codeGoesTo: "アクセスコードの送信先:",
   },
   twoFactor: {
     title: "二段階認証",

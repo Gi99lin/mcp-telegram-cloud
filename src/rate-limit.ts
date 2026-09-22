@@ -112,6 +112,30 @@ export const mcpRateLimit = rateLimit({
 });
 
 /**
+ * Limiter for `POST /my/upload`. Keyed by Bearer token when the caller is an
+ * agent and by IP for the browser dashboard. Needed because the byte quota
+ * (`uploadQuotaBytes`) only counts *pending* uploads: consuming an uploadId
+ * frees the quota immediately, so a script can write `uploadFileMaxBytes` to
+ * disk in a loop without ever tripping it. This caps request rate instead.
+ *
+ * A factory rather than a module-level const (unlike the limiters above) so
+ * the limits are read when the route is built, not when this module is first
+ * imported — that keeps it configurable from a test without depending on
+ * module import order.
+ */
+export function makeUploadRateLimit(): MiddlewareHandler {
+  return rateLimit({
+    limit: config.uploadRateLimit,
+    windowMs: config.uploadRateWindowMs,
+    scope: "upload",
+    keyOf: (c) => {
+      const auth = c.req.header("authorization");
+      return auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+    },
+  });
+}
+
+/**
  * Review-link access limiter. Very strict: real reviewers visit once or twice,
  * a brute-forcer would flood the endpoint. 10 requests per 15 minutes per IP
  * is more than enough for legitimate use and makes brute-force implausible

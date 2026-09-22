@@ -20,6 +20,8 @@ interface AuthorizePageProps {
   clientId: string;
   clientName: string;
   redirectUri: string;
+  /** Destination the code will be delivered to (scheme + host), from the route. */
+  redirectOriginKey?: string;
   state: string;
   codeChallenge: string;
   codeChallengeMethod: string;
@@ -134,6 +136,16 @@ export const AuthorizePage: FC<AuthorizePageProps> = (props) => {
           them on.
         </div>
 
+        {/* The destination host, not just the name: `client_name` is chosen by
+            whoever registered the client (registration is open, RFC 7591) and
+            can read "Claude", while the host is where the authorization code is
+            actually delivered and cannot be faked. Scanning the QR IS the
+            consent action on this page, so it has to be visible beforehand.
+            Mirrors app/src/pages/authorize.tsx, which does the same localized. */}
+        <p class={scope}>
+          Access code will be sent to: <strong>{props.redirectOriginKey ?? props.redirectUri}</strong>
+        </p>
+
         <div id="qr-section">
           <div class={qrContainer} id="qr-container">
             <div class={spinner} />
@@ -162,6 +174,11 @@ export const AuthorizePage: FC<AuthorizePageProps> = (props) => {
         <p class={scope}>Reviewing this connector? Open your review link in this browser, then try again.</p>
       </div>
 
+      {/* Both scripts are inline by design (this fallback page ships no bundle)
+          and neither interpolates a raw request value: `twoFactorSetupScript` is
+          a module constant, and every value inside `clientScript` goes through
+          `inlineJson()` above, which escapes `<`, `>`, `&` and U+2028/9 so the
+          element cannot be terminated. Held by src/__tests__/authorize-page-xss.test.ts. */}
       <script dangerouslySetInnerHTML={{ __html: twoFactorSetupScript }} />
       <script dangerouslySetInnerHTML={{ __html: clientScript }} />
     </Layout>

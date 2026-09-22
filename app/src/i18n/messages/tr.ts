@@ -23,6 +23,7 @@ export const tr: Messages = {
     connected: "Bağlandı!",
     sessionSaved: "Oturum kaydedildi. Bu sayfayı kapatabilirsiniz.",
     connectionLost: "Bağlantı koptu. Yeniden denemek için sayfayı yenileyin.",
+    codeGoesTo: "Erişim kodu şuraya gönderilecek:",
   },
   twoFactor: {
     title: "İki adımlı doğrulama",

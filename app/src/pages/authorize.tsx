@@ -10,15 +10,33 @@ export type AuthorizeProps = {
   clientId: string;
   clientName: string;
   redirectUri: string;
+  /**
+   * Canonical destination (scheme + host) the authorization code will be
+   * delivered to. Supplied by the route, which already computed it; optional so
+   * an older caller still renders, in which case it is derived from
+   * `redirectUri` below rather than silently omitted.
+   */
+  redirectOriginKey?: string;
   state: string;
   codeChallenge: string;
   codeChallengeMethod: string;
   scripts?: readonly string[];
 };
 
+/** scheme + host of a redirect URI, or the raw value when it cannot be parsed. */
+function destinationOf(redirectUri: string): string {
+  try {
+    const url = new URL(redirectUri);
+    return url.host ? `${url.protocol}//${url.host}` : `${url.protocol}${url.pathname}`;
+  } catch {
+    return redirectUri;
+  }
+}
+
 function AuthorizePage(props: AuthorizeProps) {
   const { locale, clientName } = props;
   const t = createTranslator(getMessages(locale));
+  const destination = props.redirectOriginKey ?? destinationOf(props.redirectUri);
 
   // Build the SSE URL server-side so the island stays a plain data consumer.
   const qs = new URLSearchParams({
@@ -56,6 +74,19 @@ function AuthorizePage(props: AuthorizeProps) {
         <p className="muted">
           {clientName ? `${clientName} · ` : ""}
           {t("login.title")}
+        </p>
+        {/*
+          Show the destination HOST, not only `clientName`: the name is chosen
+          by whoever registered the client (registration is open, RFC 7591) and
+          can say "Claude", while the host is where the authorization code is
+          actually delivered and cannot be faked. Scanning the QR IS the consent
+          action on this page, so the person scanning has to see who they are
+          consenting to.
+        */}
+        <p className="muted" style={{ fontSize: "0.85rem" }}>
+          {/* `login.codeGoesTo` exists in all 20 catalogs; the `Messages` type is
+              derived from messages/en.ts, so a missing locale is a build error. */}
+          {t("login.codeGoesTo")} <strong>{destination}</strong>
         </p>
 
         <QrSection

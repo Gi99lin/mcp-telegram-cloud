@@ -3,6 +3,7 @@ import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { fileNameFromUrl, sanitizeFileName } from "../filename.js";
 import type { ToolDefinition, ToolDeps } from "../tool-registry.js";
 import { errorResult, OUTBOUND_WRITE, replyTargetFields, safeOpt, sanitize, textResult } from "./helpers.js";
 
@@ -24,7 +25,10 @@ const sourceSchema = z
         .string()
         .min(1)
         .describe(
-          "Opaque upload ID returned by POST /my/upload (e.g. 'upl_a8f3...'). User-scoped, single-use, expires in ~15min.",
+          "Opaque upload ID returned by POST /my/upload (e.g. 'upl_a8f3...'). User-scoped, single-use, expires in ~15min. " +
+            "To send a LOCAL file: POST it to /my/upload on this server with the same OAuth Bearer token as this MCP session " +
+            "(curl -X POST <server>/my/upload -H 'authorization: Bearer <token>' -F 'file=@/path/to/file'), then pass the " +
+            "response's `id` here. No Origin/Referer needed on the token path.",
         ),
     }),
     z.object({
@@ -38,7 +42,8 @@ const sourceSchema = z
     }),
   ])
   .describe(
-    "Where to get the file bytes. Either an upload ID (user uploaded via /my/upload) or an https:// URL (the cloud fetches it).",
+    "Where to get the file bytes: an upload ID (bytes POSTed to /my/upload, by the user in the dashboard or by you with your " +
+      "OAuth token) or an https:// URL the cloud fetches. Local filesystem paths are NOT accepted — upload the bytes first.",
   );
 
 type SourceArg = z.infer<typeof sourceSchema>;
@@ -48,7 +53,13 @@ interface ResolvedSource {
   path: string;
   /** Cleanup function — call after the upstream method finishes (success or failure). */
   cleanup: () => Promise<void>;
-  /** Caller-supplied original filename if known (helps Telegram pick MIME). */
+  /**
+   * Sanitized name to show the recipient, or null when nothing usable was
+   * supplied. `path` is an opaque `upl_<uuid>` with no extension, so without
+   * this upstream names the document after the temp file and Telegram sniffs
+   * `application/octet-stream` — the recipient gets a nameless blob.
+   * Never used as a filesystem path: it travels to GramJS as an attribute only.
+   */
   originalName: string | null;
   /** MIME we believe the bytes carry, or "application/octet-stream" if unknown. */
   mime: string;
@@ -135,7 +146,9 @@ async function resolveSource(
       ok: true,
       resolved: {
         path: row.tmp_path,
-        originalName: row.original_name,
+        // Hostile input (multipart `file.name`) \u2014 sanitize before it reaches
+        // anyone's client. null \u21d2 fall back to upstream's own naming.
+        originalName: sanitizeFileName(row.original_name),
         mime: row.mime,
         cleanup: async () => {
           // consume() deletes row + unlinks the file. Idempotent.
@@ -176,7 +189,12 @@ async function resolveSource(
     ok: true,
     resolved: {
       path,
-      originalName: null,
+      // Deliberate choice (not an oversight): name the document after the last
+      // URL path segment. The temp file is `urlfetch_<uuid>`, so without this the
+      // recipient sees that UUID. Content-Disposition is not consulted \u2014 the
+      // fetcher does not surface headers, and letting a remote host name a file
+      // shown to a third party is a worse trade than a predictable URL segment.
+      originalName: fileNameFromUrl(source.url),
       mime: fetched.mime,
       cleanup: async () => {
         try {
@@ -197,7 +215,9 @@ export const UPLOAD_TOOLS: ToolDefinition[] = [
   {
     name: "telegram-send-file",
     description:
-      "Send a generic file to a chat. Bytes come from a prior /my/upload (uploadId) or an https:// URL the cloud fetches. URL fetch is SSRF-protected. Max ~50MB.",
+      "Send a generic file to a chat. Bytes come from a prior /my/upload (uploadId) or an https:// URL the cloud fetches. " +
+      "The recipient sees the original upload filename (or the last URL path segment), which also decides the file type shown. " +
+      "URL fetch is SSRF-protected. Max ~50MB.",
     inputSchema: {
       chatId: z.string().describe("Chat ID or username"),
       source: sourceSchema,
@@ -208,8 +228,11 @@ export const UPLOAD_TOOLS: ToolDefinition[] = [
       const r = await resolveSource(source, deps);
       if (!r.ok) return r.error;
       try {
-        await deps.telegram.sendFile(chatId, r.resolved.path, safeOpt(caption));
-        return textResult(`Sent file to ${chatId}`);
+        const fileName = r.resolved.originalName;
+        await deps.telegram.sendFile(chatId, r.resolved.path, safeOpt(caption), fileName ? { fileName } : {});
+        // Echo the name back: the only way the caller can tell that the document
+        // arrived as `report.md` and not as a nameless octet-stream blob.
+        return textResult(fileName ? `Sent file "${fileName}" to ${chatId}` : `Sent file to ${chatId}`);
       } finally {
         await r.resolved.cleanup();
       }
@@ -237,11 +260,15 @@ export const UPLOAD_TOOLS: ToolDefinition[] = [
           parseMode?: "md" | "html";
           replyTo?: number;
           topicId?: number;
+          fileName?: string;
         } = {};
         if (caption !== undefined) opts.caption = sanitize(caption);
         if (parseMode !== undefined) opts.parseMode = parseMode;
         if (replyTo !== undefined) opts.replyTo = replyTo;
         if (topicId !== undefined) opts.topicId = topicId;
+        // Name drives codec detection upstream (an extension-less temp path
+        // yields octet-stream and no audio attributes).
+        if (r.resolved.originalName) opts.fileName = r.resolved.originalName;
         const { id } = await deps.telegram.sendVoice(chatId, r.resolved.path, opts);
         return textResult(`Sent voice to ${chatId} (msg #${id})`);
       } finally {
@@ -327,9 +354,11 @@ export const UPLOAD_TOOLS: ToolDefinition[] = [
         }
         const upstreamItems = resolved.map((res, i) => {
           const itemCaption = items[i]?.caption;
-          return itemCaption !== undefined
-            ? { filePath: res.path, caption: sanitize(itemCaption) }
-            : { filePath: res.path };
+          return {
+            filePath: res.path,
+            ...(itemCaption !== undefined ? { caption: sanitize(itemCaption) } : {}),
+            ...(res.originalName ? { fileName: res.originalName } : {}),
+          };
         });
         const opts: {
           caption?: string;

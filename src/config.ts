@@ -243,6 +243,17 @@ export const config = {
   mcpRateLimit: intOr(process.env.MCP_RATE_LIMIT, 240),
   mcpRateWindowMs: intOr(process.env.MCP_RATE_WINDOW_MS, 60_000),
 
+  /**
+   * Rate-limit on `POST /my/upload`, keyed by Bearer token when present and by
+   * IP otherwise. Far stricter than /mcp: every request may carry up to
+   * `uploadFileMaxBytes` and costs a disk write, while `uploadQuotaBytes` only
+   * bounds *pending* bytes — an upload/consume/upload loop stays under quota
+   * forever. Browsers never hit this (a human picks files one at a time);
+   * it exists because the Bearer path made the route scriptable. 0 disables.
+   */
+  uploadRateLimit: intOr(process.env.UPLOAD_RATE_LIMIT, 20),
+  uploadRateWindowMs: intOr(process.env.UPLOAD_RATE_WINDOW_MS, 60_000),
+
   /** Review-link rate-limit: very strict since real use is once/twice per review.
    * Default 10 per 15 min per IP — makes brute-force implausible even if entropy drops. */
   reviewRateLimit: intOr(process.env.REVIEW_RATE_LIMIT, 10),

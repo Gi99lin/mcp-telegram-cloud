@@ -7,6 +7,30 @@ records what you can notice or need to act on.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions are the ones tagged on this repository.
 
+## [2.60.0] — 2026-09-21
+
+### Added
+
+- **Agents can finally send a local file.** `POST /my/upload` now accepts the
+  same OAuth Bearer token your MCP client already uses for `/mcp`, so a client
+  can turn a file on its own disk into an `uploadId` and pass it to
+  `telegram-send-file`, `telegram-send-album`, `telegram-send-voice`,
+  `telegram-send-video-note`, `telegram-send-story` or
+  `telegram-set-profile-photo`. Until now the upload endpoint was reachable
+  only from a browser session, so those tools were listed but unusable unless
+  you published the file to a public URL first or copied an ID out of the
+  dashboard by hand. See "Sending a local file" in the README.
+
+  The browser path is unchanged and stays CSRF-protected (same-origin
+  `Origin`/`Referer` required). The token path deliberately skips that check:
+  a browser never attaches a Bearer token by itself, and the `Authorization`
+  header forces a CORS preflight that this endpoint does not answer.
+
+- New `UPLOAD_RATE_LIMIT` / `UPLOAD_RATE_WINDOW_MS` settings (default 20
+  uploads per minute, per token or IP). The byte quota only bounds uploads
+  that are still pending, so an endpoint callable by scripts needs a rate cap
+  as well. Self-hosters who bulk-upload can raise it.
+
 ## [2.56.0] — 2026-09-08
 
 ### Security

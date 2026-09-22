@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { config } from "./config.js";
 import { hashToken, isHashedToken } from "./crypto.js";
 import { logger, logUser } from "./logger.js";
+import { redirectOrigin } from "./redirect-origin.js";
 
 /** OAuth 2.0 Authorization Server for MCP (RFC 8414, RFC 7591, RFC 7636) */
 
@@ -100,6 +101,17 @@ export class OAuthProvider {
       CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires_at ON oauth_codes(expires_at);
       CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expires_at ON oauth_tokens(expires_at);
       CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_expires_at ON oauth_refresh_tokens(expires_at);
+      -- Which callback destinations a user has knowingly connected. Gates the
+      -- silent /oauth/authorize fast path: without a grant the user is asked to
+      -- confirm, so a link to a stranger's freshly registered client can no
+      -- longer mint a code out of an ambient cookie. Keyed by redirect ORIGIN,
+      -- not client_id -- see src/redirect-origin.ts for why.
+      CREATE TABLE IF NOT EXISTS oauth_grants (
+        user_id TEXT NOT NULL,
+        redirect_origin TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (user_id, redirect_origin)
+      );
     `);
 
     // Idempotent migration: refresh-token rotation + replay detection (v2.23.0).
@@ -182,6 +194,75 @@ export class OAuthProvider {
     return this.db.prepare("SELECT * FROM oauth_clients WHERE client_id = ?").get(clientId) as
       | RegisteredClient
       | undefined;
+  }
+
+  /**
+   * Remember that `userId` knowingly connected this callback destination.
+   * Called from the explicit-approval route and from every token issue, so the
+   * table self-populates for active users instead of needing a data migration.
+   */
+  recordGrant(userId: string, redirectOriginKey: string): void {
+    if (!userId || !redirectOriginKey) return;
+    this.db
+      .prepare("INSERT OR IGNORE INTO oauth_grants (user_id, redirect_origin) VALUES (?, ?)")
+      .run(userId, redirectOriginKey);
+  }
+
+  /** Convenience wrapper: derive the origin key from a full redirect URI. */
+  recordGrantForRedirect(userId: string, redirectUri: string): void {
+    const originKey = redirectOrigin(redirectUri);
+    if (originKey) this.recordGrant(userId, originKey);
+  }
+
+  /**
+   * Has this user already connected this callback destination?
+   *
+   * Two sources, deliberately:
+   *  1. `oauth_grants` \u2014 explicit, written on approval and on token issue.
+   *  2. Live tokens \u2014 the GRANDFATHER clause. At the moment this ships, nobody
+   *     has a row in (1), yet every current user already trusted their client;
+   *     asking them all to re-confirm would be a self-inflicted outage. A user
+   *     holding an access or refresh token for a client that points at this
+   *     origin has demonstrably completed the flow before, so it counts.
+   *
+   * The grandfather clause stays permanently rather than as a one-off backfill:
+   * `cleanup()` deletes expired access tokens, and a user whose grant row was
+   * somehow lost but who still holds a working refresh token must not be
+   * bounced through a confirmation screen mid-session.
+   */
+  hasGrant(userId: string, redirectOriginKey: string): boolean {
+    if (!userId || !redirectOriginKey) return false;
+
+    const explicit = this.db
+      .prepare("SELECT 1 FROM oauth_grants WHERE user_id = ? AND redirect_origin = ? LIMIT 1")
+      .get(userId, redirectOriginKey);
+    if (explicit) return true;
+
+    // Origins live inside a JSON array column, so the comparison happens in JS.
+    // Bounded by the number of DISTINCT clients this one user holds tokens for.
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT c.redirect_uris AS uris
+           FROM oauth_clients c
+          WHERE c.client_id IN (SELECT client_id FROM oauth_tokens WHERE user_id = ?)
+             OR c.client_id IN (SELECT client_id FROM oauth_refresh_tokens WHERE user_id = ? AND revoked = 0)`,
+      )
+      .all(userId, userId) as Array<{ uris: string }>;
+
+    for (const row of rows) {
+      let uris: unknown;
+      try {
+        uris = JSON.parse(row.uris);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(uris)) continue;
+      for (const uri of uris) {
+        if (typeof uri !== "string") continue;
+        if (redirectOrigin(uri) === redirectOriginKey) return true;
+      }
+    }
+    return false;
   }
 
   /** Total registered clients — used to enforce the registration ceiling. */
@@ -281,6 +362,10 @@ export class OAuthProvider {
     if (!this.verifyPKCE(params.codeVerifier, row.code_challenge, row.code_challenge_method)) {
       return null;
     }
+
+    // The user completed a full authorization for this destination \u2014 record it so
+    // the next visit takes the silent fast path instead of a confirmation screen.
+    this.recordGrantForRedirect(row.user_id, row.redirect_uri);
 
     return this.issueTokenPair(row.client_id, row.user_id, randomBytes(16).toString("hex"));
   }
