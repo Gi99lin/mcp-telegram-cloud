@@ -28,6 +28,10 @@ const oauthStub = {
       : undefined,
   clientCount: () => 0,
   createAuthCode: (_args: unknown) => "test-code",
+  // These tests are about the admin gate / fixed-owner-id wiring, not the
+  // consent-gate feature — grant every destination so the fast path is
+  // reachable, same as a returning admin who already approved this client.
+  hasGrant: (_userId: string, _originKey: string) => true,
 } as unknown as Parameters<typeof createOAuthRoutes>[0]["oauth"];
 
 function makeApp(tryReconnectSession: (userId: string) => Promise<unknown>) {

@@ -30,10 +30,16 @@ const destructiveStub = {
 } as unknown as MyRoutesDeps["destructive"];
 const sessionsStub = {} as unknown as MyRoutesDeps["sessions"];
 const uploadsStub = {} as unknown as MyRoutesDeps["uploads"];
+// Neither test exercises POST /my/upload's Bearer path — validateToken is
+// never called, so a stub that always misses is enough to satisfy the type.
+const oauthStub = { validateToken: (_token: string) => undefined } as unknown as MyRoutesDeps["oauth"];
 
 function makeApp() {
   const app = new Hono();
-  app.route("/my", createMyRoutes({ destructive: destructiveStub, sessions: sessionsStub, uploads: uploadsStub }));
+  app.route(
+    "/my",
+    createMyRoutes({ destructive: destructiveStub, sessions: sessionsStub, uploads: uploadsStub, oauth: oauthStub }),
+  );
   return app;
 }
 
