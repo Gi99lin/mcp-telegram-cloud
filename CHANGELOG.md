@@ -7,6 +7,17 @@ records what you can notice or need to act on.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions are the ones tagged on this repository.
 
+## [Unreleased]
+
+### Fixed
+
+- **No more "reconnect" prompt after a break.** The server closes an MCP
+  session after it sits idle for a while. The next request from your client
+  used to get `400 Server not initialized`, which Claude treats as a broken
+  connector, so it asked you to reconnect and sign in again. The server now
+  answers `404 Session not found`, as the MCP spec requires, and the client
+  opens a new session on its own with the token it already has.
+
 ## [2.60.0] — 2026-09-21
 
 ### Added

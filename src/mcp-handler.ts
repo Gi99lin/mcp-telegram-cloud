@@ -369,6 +369,26 @@ async function handleMcpRequestInner(
     }
   }
 
+  // A session id we don't hold (reaped as idle, or lost in a restart) must get
+  // 404 + -32001, never a fresh transport: per the MCP spec a 404 tells the
+  // client to re-initialize on its own. Falling through made the SDK answer
+  // 400 "Server not initialized", which Claude treats as a dead connector and
+  // shows the user a "reconnect" prompt (plus a full OAuth round) after every
+  // idle period.
+  if (sessionId) {
+    logger.info(`Unknown MCP session id, answering 404: ${sessionId}`, {
+      component: "cloud",
+      userId: logUser(userId),
+      event: "session.unknown",
+      sessionId,
+      method: req.method,
+    });
+    return Response.json(
+      { jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null },
+      { status: 404 },
+    );
+  }
+
   // Capture UA-derived client class at session-creation time. The close handler
   // can fire long after the originating request is gone, so we must remember
   // which bucket to decrement — `sessionClient` carries this across the lifetime.
