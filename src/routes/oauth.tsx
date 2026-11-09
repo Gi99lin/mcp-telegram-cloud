@@ -377,6 +377,11 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("Forbidden", 403);
     }
 
+    if (config.singleOperatorMode && !isAdminSessionValid(c.req.header("cookie"))) {
+      incr(OAUTH_FLOW, { step: "approve", outcome: "admin_login_required" });
+      return c.text("No active admin session — start again from your client", 403);
+    }
+
     const form = await c.req.parseBody().catch(() => null);
     const field = (name: string): string => {
       const v = form?.[name];
@@ -402,7 +407,7 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       return c.text("PKCE required: code_challenge with code_challenge_method=S256", 400);
     }
 
-    const userId = getUserIdHint(c);
+    const userId = config.singleOperatorMode ? config.ownerUserId : getUserIdHint(c);
     if (!userId) {
       incr(OAUTH_FLOW, { step: "approve", outcome: "no_session" });
       return c.text("No active session \u2014 start again from your client", 403);

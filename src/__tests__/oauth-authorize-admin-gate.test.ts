@@ -28,6 +28,7 @@ const oauthStub = {
       : undefined,
   clientCount: () => 0,
   createAuthCode: (_args: unknown) => "test-code",
+  recordGrant: () => undefined,
   // These tests are about the admin gate / fixed-owner-id wiring, not the
   // consent-gate feature — grant every destination so the fast path is
   // reachable, same as a returning admin who already approved this client.
@@ -135,4 +136,37 @@ describe("admin gate rejects non-admin credentials — no bypass via a spoofed o
       assert.equal(res.status, 403);
     });
   }
+});
+
+describe("POST /oauth/authorize/approve admin gate", () => {
+  function approve(app: Hono, cookie: string) {
+    return app.request("/oauth/authorize/approve", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        origin: config.issuer,
+        cookie,
+      },
+      body: AUTHORIZE_QS,
+      redirect: "manual",
+    });
+  }
+
+  it("rejects a Telegram hint without a valid admin session", async () => {
+    const app = makeApp(async () => ({ connected: true }));
+    const res = await approve(app, `tg_user=${encodeURIComponent(config.ownerUserId)}`);
+    assert.equal(res.status, 403);
+    assert.equal(res.headers.get("location"), null);
+  });
+
+  it("uses the fixed owner with a valid admin session", async () => {
+    const cookie = buildAdminSessionCookie().split(";")[0];
+    const app = makeApp(async (userId) => {
+      assert.equal(userId, config.ownerUserId);
+      return { connected: true };
+    });
+    const res = await approve(app, cookie);
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.get("location"), "https://client.example/cb?code=test-code&state=xyz");
+  });
 });
