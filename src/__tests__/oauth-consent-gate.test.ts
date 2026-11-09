@@ -27,6 +27,7 @@ import { Hono } from "hono";
 const { Database } = await import("bun:sqlite");
 const { OAuthProvider } = await import("../oauth.js");
 const { createOAuthRoutes } = await import("../routes/oauth.js");
+const { securityHeaders } = await import("../middleware/security-headers.js");
 const { redirectOrigin } = await import("../redirect-origin.js");
 const { config } = await import("../config.js");
 
@@ -48,6 +49,7 @@ function setup(opts: { sessionAlive?: boolean } = {}): Deps {
     tryReconnectSession: async () => (opts.sessionAlive === false ? null : { connected: true }),
   } as never;
   const app = new Hono();
+  app.use("*", securityHeaders);
   app.route("/oauth", createOAuthRoutes({ oauth, sessions }));
   return { oauth, app };
 }
@@ -70,6 +72,7 @@ describe("GET /oauth/authorize — unknown destination cannot mint a code silent
 
     assert.equal(res.status, 200, "must not be a 302 to the attacker");
     assert.equal(res.headers.get("location"), null, "no Location header at all");
+    assert.equal(res.headers.get("Referrer-Policy"), "same-origin", "consent form must preserve its Origin header");
     const html = await res.text();
     assert.ok(!html.includes("code="), "no authorization code anywhere in the response");
     // The host is the part the attacker cannot fake; the page must show it.
@@ -86,6 +89,7 @@ describe("GET /oauth/authorize — unknown destination cannot mint a code silent
     });
 
     assert.equal(res.status, 302);
+    assert.equal(res.headers.get("Referrer-Policy"), "no-referrer");
     const loc = res.headers.get("location") ?? "";
     assert.ok(loc.startsWith("https://claude.ai/api/mcp/auth_callback?code="), loc);
     assert.match(loc, /state=s/);

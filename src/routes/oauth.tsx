@@ -234,6 +234,8 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
           event: "oauth.consent.required",
           userId: logUser(userIdHint),
         });
+        // A no-referrer policy serializes the browser Origin as null on form POST.
+        c.header("Referrer-Policy", "same-origin");
         return c.html(
           <ConsentPage
             clientId={clientId}
