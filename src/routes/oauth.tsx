@@ -8,6 +8,7 @@ import { logger, logUser } from "../logger.js";
 import type { OAuthProvider } from "../oauth.js";
 import { AuthorizePage } from "../pages/AuthorizePage.js";
 import { ConsentPage } from "../pages/ConsentPage.js";
+import { Layout } from "../pages/Layout.js";
 import { handleOAuthQrLogin } from "../qr-login.js";
 import { oauthRateLimit, registerRateLimit } from "../rate-limit.js";
 import { detectRequestLocale, islandScripts, reactPagesAvailable, renderReactPage } from "../react-pages.js";
@@ -438,6 +439,22 @@ export function createOAuthRoutes({ oauth, sessions }: OAuthRoutesDeps): Hono {
       clientId,
     });
     incr(OAUTH_FLOW, { step: "approve", outcome: "ok" });
+
+    // Chromium applies form-action to redirects in the form submission chain.
+    // An HTML response starts a separate navigation without widening the policy.
+    const acceptsHtml = c.req.header("accept")?.includes("text/html");
+    if (acceptsHtml && (target.startsWith("https://") || target.startsWith("http://"))) {
+      c.header("Cache-Control", "no-store");
+      c.header("Refresh", `0; url=${target}`);
+      return c.html(
+        <Layout title="Return to your client">
+          <p>
+            Connection approved. <a href={target}>Return to your client</a> if it does not open automatically.
+          </p>
+        </Layout>,
+      );
+    }
+
     return c.redirect(target, 302);
   });
 

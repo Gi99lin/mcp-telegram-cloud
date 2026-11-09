@@ -192,6 +192,26 @@ describe("POST /oauth/authorize/approve", () => {
     assert.equal(again.status, 302);
   });
 
+  it("hands browser approval off to the loopback callback outside the form redirect", async () => {
+    const { oauth, app } = setup();
+    const redirectUri = "http://localhost:18184/oauth/callback";
+    const clientId = register(oauth, redirectUri, "Claude Desktop");
+    const res = await app.request("/oauth/authorize/approve", {
+      method: "POST",
+      headers: { accept: "text/html", cookie: `tg_user=${USER}`, origin: ISSUER },
+      body: body(clientId, redirectUri),
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("location"), null);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    assert.match(res.headers.get("content-security-policy") ?? "", /form-action 'self'/);
+    const refresh = res.headers.get("refresh") ?? "";
+    assert.ok(refresh.startsWith(`0; url=${redirectUri}?code=`));
+    assert.equal(new URL(refresh.slice("0; url=".length)).searchParams.get("state"), "s");
+    assert.match(await res.text(), /href="http:\/\/localhost:18184\/oauth\/callback\?code=/);
+  });
+
   it("rejects a cross-site submission (wrong Origin)", async () => {
     const { oauth, app } = setup();
     const clientId = register(oauth, "https://evil.example/cb", "Evil");
